@@ -1,1 +1,90 @@
-IyBBSSBBZ2VudCBHYXRld2F5IFNob3djYXNlCgrkuIDlpZflj6/mj5Lmi5TnmoQgTXVsdGktQWdlbnQgLyBSQUcg572R5YWz77ya5ZCM5LiA5aWX5byV5pOO5om/6L295aSa5Lia5Yqh5Zy65pmv77yM57uf5LiA5aSE55CG5oSP5Zu+6Lev55Sx44CB55+l6K+G5qOA57Si44CB5bel5YW36LCD55So44CB5rWB5byP5Zue562U44CB6K6h6LS55LiO5Y+v6KeC5rWL6L+Q57u044CC5b2T5YmN6JC95Zyw5rCR5rOV5YW45ZKo6K+i5LiO5peF5ri46KeE5YiS77yM5p625p6E5Y+v6L+B56e75Yiw5LyB5Lia55+l6K+G5bqT44CB5ZCI5ZCM5a6h5p+l44CB5a6i5pyN6LSo5qOA562J5LyB5Lia5pyN5Yqh5Zy65pmv44CCCgpb5Zyo57q/5ryU56S6XShodHRwczovL3RoZS13b3JsZC1hZ2VudC5jbG91ZCkgwrcgW+mhueebruWxleekul0oc2hvd2Nhc2UvUkVBRE1FLm1kKSDCtyBb5qC45b+D5Luj56CB5a+86K+7XShzaG93Y2FzZS9jb3JlL1JFQURNRS5tZCkKCiMjIOmhueebruWumuS9jQoK6L+Z5Liq5LuT5bqT6YeN54K55bGV56S65LiJ5Lu25LqL77yaCgotICoq5Lia5Yqh5Y+v5aSN55SoKirvvJpBZ2VudCDlvJXmk47kuI7kuJrliqHphY3nva7liIbnprvjgILmlrDlop7lnLrmma/kuLvopoHlop7liqDphY3nva7ljIXvvIzkuI3lpI3liLbkuIDlpZfnvZHlhbPjgIIKLSAqKuetlOahiOWPr+i/vea6ryoq77ya55+l6K+G6Zeu562U6LWwIHBndmVjdG9yIOS4jiBwZ190cmdtIOWPjOi3r+WPrOWbnuOAgVJSRiDono3lkIjlkowgQ3Jvc3NFbmNvZGVyIOmHjeaOku+8m+WbnuetlOW8leeUqOazleadoe+8jOmbtuWPrOWbnuebtOaOpeaLkuetlOOAggotICoq5bel56iL5Y+v5Lqk5LuYKirvvJrpmaTmqKHlnovosIPnlKjlpJbvvIzov5jljIXlkKsgU1NFIOa1geW8j+mTvui3r+OAgeiupOivgemZkOa1geOAgeivreS5iee8k+WtmOOAgeaUr+S7mOS4gOiHtOaAp+OAgei/geenu+OAgeWbnua7muWSjOe6v+S4iuaOkumanOOAggoKIyMg5p625p6ECgpgYGBtZXJtYWlkCmZsb3djaGFydCBMUgogICAgVVtWdWUgMyBQV0EgLyBBUEldIC0tPiBOR1tOZ2lueF0KICAgIE5HIC0tPiBHVUFSRFtKV1Qgwrcg6ZmQ5rWBIMK3IOeGlOaWrSDCtyDlronlhajov4fmu6RdCiAgICBHVUFSRCAtLT4gQ0FDSEVb5LiJ57qn6K+t5LmJ57yT5a2YXQogICAgQ0FDSEUgLS0+fOWRveS4rXwgT1VUW1NTRSDmtYHlvI/ov5Tlm55dCiAgICBDQUNIRSAtLT585pyq5ZG95LitfCBST1VURVvkuKTnuqfmhI/lm77ot6/nlLFdCiAgICBST1VURSAtLT58566A5Y2V5Lu75YqhfCBUT09MW+WNleW3peWFt+ebtOi/nl0KICAgIFJPVVRFIC0tPnzlpI3mnYLku7vliqF8IFJFQUNUW1JlQWN0IMK3IE11bHRpLUFnZW50IOWchuahjF0KICAgIFJPVVRFIC0tPnznn6Xor4bpl67nrZR8IFJBR1vlj4zot6/lj6zlm54gLT4gUlJGIC0+IENyb3NzRW5jb2Rlcl0KICAgIFRPT0wgJiBSRUFDVCAmIFJBRyAtLT4gTExNW0RlZXBTZWVrIC8gUXdlbl0KICAgIFJFQUNUICYgUkFHIC0tPiBQR1soUG9zdGdyZVNRTDxici8+cGd2ZWN0b3Igwrcg5pSv5LuY5rWB5rC0KV0KICAgIENBQ0hFICYgUkVBQ1QgLS0+IFJEWyhSZWRpczxici8+57yT5a2YIMK3IOmZkOa1gSDCtyDplIEpXQogICAgUEcgJiBSRCAtLT4gT1VUCmBgYAoK5Lia5Yqh5bGe5oCn6YCa6L+H6YWN572u5YyF5aSW572u77yM5YyF5ous5Lq65qC844CB5bel5YW344CB5qih5Z6L562W55Wl5ZKM6Lev55Sx6KeE5YiZ44CC5qC45b+D5omn6KGM5bGC6LSf6LSj6Lev55Sx44CBUmVBY3Qg5b6q546v44CB5bm26KGM5Y2P5L2c44CB5Y+W5raI5oGi5aSN44CB6ZmN57qn5ZKM57uT5p6c6IGa5ZCI44CCCgojIyDlhbPplK7mjIfmoIcKCnwg57u05bqmIHwg5b2T5YmN57uT5p6cIHwg5Y+j5b6E5LiO6L6555WMIHwKfC0tLXwtLS18LS0tfAp8IOS4muWKoeWkjeeUqCB8IDEg5aWX5byV5pOO5om/6L29IDIg57G75Zy65pmvIHwg5peF5ri46KeE5YiS5LiO5rCR5rOV5YW45ZKo6K+i77yb5paw5aKe6aKG5Z+f6YCa6L+H6YWN572u5YyF5o6l5YWlIHwKfCDnn6Xor4bor63mlpkgfCDmsJHms5XlhbggMTI2MCDmnaHnuqYgMTAg5LiH5a2XIHwg5YWo6YeP5riF5rSX5YWl5bqT77yb5rOV5p2h5byV55So6YCQ5p2h5Zue5p+l77yM6Zu25Y+s5Zue5ouS562UIHwKfCDmo4DntKLotKjph48gfCBob2xkb3V0IFJlY2FsbEA1IDkzLjAlIC8gUmVjYWxsQDEwIDk5LjMlIC8gTVJSIDAuODc5IHwgMTkwIOadoeazleadoee6p+S6uuW3peagh+azqOmbhu+8m+mHjeaOkuW8gOWQr++8jOiHqua1i+e7k+aenCB8Cnwg6YeN5o6S5Y+W6IiNIHwg5YWz6Zet5ZCOIGhvbGRvdXQgUmVjYWxsQDUg5Li6IDg4LjUlIHwg6YeN5o6S5bi46am757qmIDEuMUdC77yMMiDmoLggMUdCIOeOr+Wig+S4i+m7mOiupOWFs+mXre+8jOWPr+aMiemcgOaBouWkjSB8Cnwg5LiA6Ie05oCn5LiO6K6h6LS5IHwg5YiG5biD5byP6ZSBICsg5LmQ6KeC6ZSBICsg5LqL5Yqh5rWB5rC0ICsg6KGl5YG/IHwg5bmC562J6ZSu6Ziy6YeN5aSN5omj6LS577yb6K6i5Y2V5LiO5rWB5rC05ZCM5LqL5Yqh5YaZ5YWlIHwKfCDpg6jnvbLkuI7mgaLlpI0gfCDpmL/ph4zkupEgMiDmoLggMUdC77yM5Y2V5py6IGxpdGUg5qCIIHwg5aSH5Lu95oGi5aSN5ryU57uDIDQg56eS77yb5pys5ZywIENvbXBvc2Ug5pSv5oyB5aSa5a6e5L6L5LiOIE5naW54IOi0n+i9veWdh+ihoSB8Cnwg5bel56iL6Zeo56aBIHwg5Ye95pWw5LiN6LaF6L+HIDgwIOihjO+8jOaWh+S7tuS4jei2hei/hyA2MDAg6KGMIHwg6YCa6L+H6Z2Z5oCB6ISa5pys5qOA5p+l77yb5aSW6YOo6K+E5rWL5ZKM5Lia5Yqh5oyH5qCH5Z2H5Li66Ieq5rWLIHwKCuW9k+WJjeWkhOS6juWwj+iMg+WbtOWGhea1i+mYtuaute+8jOecn+WunueUqOaIt+mHj+i+g+Wwj+OAguS7k+W6k+WGheaAp+iDveOAgeivhOa1i+WSjOaBouWkjeaVsOaNrueUqOS6juivgeaYjuW3peeoi+Wunui3te+8jOS4jeS7o+ihqOWVhuS4mua1gemHj+inhOaooeOAggoKIyMgRGVtbwoKLSDlnKjnur/kvZPpqozvvJpodHRwczovL3RoZS13b3JsZC1hZ2VudC5jbG91ZAotIOmhueebruivtOaYju+8mltzaG93Y2FzZS9SRUFETUUubWRdKHNob3djYXNlL1JFQURNRS5tZCkKLSDmoLjlv4Pku6PnoIHlr7zor7vvvJpbc2hvd2Nhc2UvY29yZS9SRUFETUUubWRdKHNob3djYXNlL2NvcmUvUkVBRE1FLm1kKQoKIyMg5qC45b+D5Luj56CB57Si5byVCgp8IOiDveWKmyB8IOS7o+eggeWFpeWPoyB8IOmHjeeCuSB8CnwtLS18LS0tfC0tLXwKfCDlj6/mj5Lmi5Tot6/nlLEgfCBbcm91dGVyLnB5XShhcHAvYWdlbnRzL3JvdXRlci5weSkgLyBbcm91dGluZ190YWJsZS5weV0oYXBwL2FnZW50cy9yb3V0aW5nX3RhYmxlLnB5KSB8IOWFs+mUruivjeW/q+i3r+eUseS4juaooeWei+WFnOW6le+8jOS4muWKoei3r+eUseinhOWImeWklue9riB8CnwgQWdlbnQg5omn6KGMIHwgW3J1bm5lci5weV0oYXBwL2FnZW50cy9ydW5uZXIucHkpIHwgUmVBY3Qg5b6q546v44CB5bel5YW36LCD55So44CB5q2l5pWw5o6n5Yi244CB6YeN6K+V5LiO6ZmN57qnIHwKfCDlpJogQWdlbnQg5Y2P5L2cIHwgW29yY2hlc3RyYXRvci5weV0oYXBwL2FnZW50cy9vcmNoZXN0cmF0b3IucHkpIHwg5bm26KGM5YiG5p6Q44CB5Lqk5Y+J5a6h6ZiF44CB5Luy6KOB5ZCI5oiQIHwKfCBSQUcg5qOA57SiIHwgW2tiX2VtYmVkZGluZy5weV0oYXBwL2FnZW50cy9rYl9lbWJlZGRpbmcucHkpIC8gW2tiX3JlcmFuay5weV0oYXBwL2FnZW50cy9rYl9yZXJhbmsucHkpIHwg5ZCR6YeP5LiO5YWz6ZSu6K+N5Y+s5Zue44CBUlJGIOiejeWQiOOAgeacrOWcsOmHjeaOkiB8Cnwg5byV55So5LiO5ouS562UIHwgW2NpdmlsX2dyb3VuZGluZy5weV0oYXBwL3NlcnZpY2VzL2NpdmlsX2dyb3VuZGluZy5weSkgfCDms5XmnaHmuq/mupDjgIHlvJXnlKjmoKHpqozjgIHpm7blj6zlm57kuI3osIPnlKjmqKHlnosgfAp8IOa1geW8j+e9keWFsyB8IFtjaGF0X3N0cmVhbV9jb3JlLnB5XShhcHAvc2VydmljZXMvY2hhdF9zdHJlYW1fY29yZS5weSkgLyBbc3RyZWFtX3V0aWxzLnB5XShhcHAvY29yZS9zdHJlYW1fdXRpbHMucHkpIHwgU1NFIOWIhuW4p+OAgeW3peWFt+WIhuWPkeOAgea1geW8j+mUmeivr+aUtuWPoyB8Cnwg6K+t5LmJ57yT5a2YIHwgW3NlbWFudGljX2NhY2hlLnB5XShhcHAvY29yZS9zZW1hbnRpY19jYWNoZS5weSkgfCDlpJrnuqfnvJPlrZjjgIHkuIrkuIvmlofpmpTnprvplK7jgIHmipfpm6rltKkgfAp8IOiupOivgeS4juS/neaKpCB8IFthdXRoLnB5XShhcHAvbWlkZGxld2FyZS9hdXRoLnB5KSAvIFtyYXRlX2xpbWl0LnB5XShhcHAvbWlkZGxld2FyZS9yYXRlX2xpbWl0LnB5KSB8IEpXVCDova7mjaLjgIFSZWRpcyDliIbluIPlvI/pmZDmtYHjgIHnhpTmlq3pmY3nuqcgfAp8IOaUr+S7mOS4gOiHtOaApyB8IFtzZXJ2aWNlLnB5XShhcHAvcGF5bWVudC9zZXJ2aWNlLnB5KSAvIFtkZWR1Y3Rpb24ucHldKGFwcC9wYXltZW50L2RlZHVjdGlvbi5weSkgLyBbcmVmdW5kLnB5XShhcHAvcGF5bWVudC9yZWZ1bmQucHkpIHwg5bmC562J44CB6ZSB44CB5LqL5Yqh44CB6YCA5qy+5LiO6KGl5YG/IHwKfCDliY3nq6/mtYHlvI/kuqTkupIgfCBbc3NlLnRzXShmcm9udGVuZC9zcmMvYXBpL3NzZS50cykgLyBbY2hhdC50c10oZnJvbnRlbmQvc3JjL3N0b3Jlcy9jaGF0LnRzKSB8IOi3qCBjaHVuayDmlJLluKfjgIHluo/lj7flrojljavjgIHkvJror53nirbmgIHnrqHnkIYgfAoKIyMg5oqA5pyv5qCICgpQeXRob24gwrcgRmFzdEFQSSDCtyBhc3luY2lvIMK3IFBvc3RncmVTUUzvvIhwZ3ZlY3RvciAvIHBnX3RyZ23vvInCtyBSZWRpcyDCtyBWdWUgMyDCtyBUeXBlU2NyaXB0IMK3IFZpdGUgwrcgRG9ja2VyIENvbXBvc2UgwrcgTmdpbnggwrcgU1NFIMK3IERlZXBTZWVrIC8gUXdlbiDCtyBQcm9tZXRoZXVzIC8gR3JhZmFuYSAvIExva2kgLyBUZW1wbwoKIyMg5LuT5bqT57uT5p6ECgpgYGB0ZXh0CmFwcC8gICAgICAgICAgICAgICAgIOWQjuerr+aguOW/g++8mmFnZW50cyAvIHNlcnZpY2VzIC8gcm91dGluZyAvIHBheW1lbnQgLyBjb3JlCmZyb250ZW5kLyAgICAgICAgICAgIFZ1ZSAzIOWJjeerr+S4jiBTU0Ug5rWB5byP5Lqk5LqSCnNob3djYXNlLyAgICAgICAgICAgIOmdouWQkeaLm+iBmOaWueeahOmhueebruWxleekuuS4juaguOW/g+S7o+eggeWvvOivuwphZ2VudF9kb2NzLyAgICAgICAgICDohLHmlY/lkI7nmoQgQnVnIOaXpeW/l+S4juS/ruWkjeWPsOi0pgphbGVtYmljLyAgICAgICAgICAgICDmlbDmja7lupPniYjmnKzljJbov4Hnp7sKZGVwbG95LyAgICAgICAgICAgICAg6YOo572y55u45YWz6YWN572uCnRlc3RzLyAgICAgICAgICAgICAgIOa1i+ivleS4juivhOa1i+S7o+eggeW/q+eFpwrlj6/lpI3nlKjku6PnoIEvICAgICAgICAgICDliIbluIPlvI/plIHjgIHnhpTmlq3lmajjgIHljZXpo57luYLnrYnjgIFMUlUrVFRM44CB6ZmQ5rWB5ZmoCuWPr+WkjeeUqOi1hOS6py8gICAgICAgICAgIOi3qOmhueebruaooeadv+OAgU1DUCDkuI7mioDog73otYTkuqcKYGBgCgojIyDlkIzmraXor7TmmI4KCuacrOS7k+aYr+iEseaVj+WxleekuuW/q+eFp++8jOaguOW/g+S7o+eggeWQjOatpeiHquengeacieS4u+S7k+OAguS/ruWkjeWPsOi0pumaj+S7k+WFrOW8gO+8m+ivhOa1i+ivreaWmeOAgee6v+S4iuWvhumSpeOAgei/kOe7tOe7huiKguWSjOWGhemDqOWkjeebmOS4jei/m+WFpeWFrOW8gOS7k+W6k+OAguWvueWkluaVsOWtl+WPquS/neeVmeWPr+ino+mHiuOAgeWPr+i/vea6r+S4lOaYjuehruagh+azqOS4uuiHqua1i+eahOWPo+W+hOOAggo=
+# AI Agent Gateway Showcase
+
+一套可插拔的 Multi-Agent / RAG 网关：同一套引擎承载多业务场景，统一处理意图路由、知识检索、工具调用、流式回答、计费与可观测运维。当前落地民法典咨询与旅游规划，架构可迁移到企业知识库、合同审查、客服质检等企业服务场景。
+
+[在线演示](https://the-world-agent.cloud) · [项目展示](showcase/README.md) · [核心代码导读](showcase/core/README.md)
+
+## 项目定位
+
+这个仓库重点展示三件事：
+
+- **业务可复用**：Agent 引擎与业务配置分离。新增场景主要增加配置包，不复制一套网关。
+- **答案可追溯**：知识问答走 pgvector 与 pg_trgm 双路召回、RRF 融合和 CrossEncoder 重排；回答引用法条，零召回直接拒答。
+- **工程可交付**：除模型调用外，还包含 SSE 流式链路、认证限流、语义缓存、支付一致性、迁移、回滚和线上排障。
+
+## 架构
+
+```mermaid
+flowchart LR
+    U[Vue 3 PWA / API] --> NG[Nginx]
+    NG --> GUARD[JWT · 限流 · 熔断 · 安全过滤]
+    GUARD --> CACHE[三级语义缓存]
+    CACHE -->|命中| OUT[SSE 流式返回]
+    CACHE -->|未命中| ROUTE[两级意图路由]
+    ROUTE -->|简单任务| TOOL[单工具直连]
+    ROUTE -->|复杂任务| REACT[ReAct · Multi-Agent 圆桌]
+    ROUTE -->|知识问答| RAG[双路召回 -> RRF -> CrossEncoder]
+    TOOL & REACT & RAG --> LLM[DeepSeek / Qwen]
+    REACT & RAG --> PG[(PostgreSQL<br/>pgvector · 支付流水)]
+    CACHE & REACT --> RD[(Redis<br/>缓存 · 限流 · 锁)]
+    PG & RD --> OUT
+```
+
+业务属性通过配置包外置，包括人格、工具、模型策略和路由规则。核心执行层负责路由、ReAct 循环、并行协作、取消恢复、降级和结果聚合。
+
+## 关键指标
+
+| 维度 | 当前结果 | 口径与边界 |
+|---|---|---|
+| 业务复用 | 1 套引擎承载 2 类场景 | 旅游规划与民法典咨询；新增领域通过配置包接入 |
+| 知识语料 | 民法典 1260 条约 10 万字 | 全量清洗入库；法条引用逐条回查，零召回拒答 |
+| 检索质量 | holdout Recall@5 93.0% / Recall@10 99.3% / MRR 0.879 | 190 条法条级人工标注集；重排开启，自测结果 |
+| 重排取舍 | 关闭后 holdout Recall@5 为 88.5% | 重排常驻约 1.1GB，2 核 1GB 环境下默认关闭，可按需恢复 |
+| 一致性与计费 | 分布式锁 + 乐观锁 + 事务流水 + 补偿 | 幂等键防重复扣费；订单与流水同事务写入 |
+| 部署与恢复 | 阿里云 2 核 1GB，单机 lite 栈 | 备份恢复演练 4 秒；本地 Compose 支持多实例与 Nginx 负载均衡 |
+| 工程门禁 | 函数不超过 80 行，文件不超过 600 行 | 通过静态脚本检查；外部评测和业务指标均为自测 |
+
+当前处于小范围内测阶段，真实用户量较小。仓库内性能、评测和恢复数据用于证明工程实践，不代表商业流量规模。
+
+## Demo
+
+- 在线体验：https://the-world-agent.cloud
+- 项目说明：[showcase/README.md](showcase/README.md)
+- 核心代码导读：[showcase/core/README.md](showcase/core/README.md)
+
+## 核心代码索引
+
+| 能力 | 代码入口 | 重点 |
+|---|---|---|
+| 可插拔路由 | [router.py](app/agents/router.py) / [routing_table.py](app/agents/routing_table.py) | 关键词快路由与模型兜底，业务路由规则外置 |
+| Agent 执行 | [runner.py](app/agents/runner.py) | ReAct 循环、工具调用、步数控制、重试与降级 |
+| 多 Agent 协作 | [orchestrator.py](app/agents/orchestrator.py) | 并行分析、交叉审阅、仲裁合成 |
+| RAG 检索 | [kb_embedding.py](app/agents/kb_embedding.py) / [kb_rerank.py](app/agents/kb_rerank.py) | 向量与关键词召回、RRF 融合、本地重排 |
+| 引用与拒答 | [civil_grounding.py](app/services/civil_grounding.py) | 法条溯源、引用校验、零召回不调用模型 |
+| 流式网关 | [chat_stream_core.py](app/services/chat_stream_core.py) / [stream_utils.py](app/core/stream_utils.py) | SSE 分帧、工具分发、流式错误收口 |
+| 语义缓存 | [semantic_cache.py](app/core/semantic_cache.py) | 多级缓存、上下文隔离键、抗雪崩 |
+| 认证与保护 | [auth.py](app/middleware/auth.py) / [rate_limit.py](app/middleware/rate_limit.py) | JWT 轮换、Redis 分布式限流、熔断降级 |
+| 支付一致性 | [service.py](app/payment/service.py) / [deduction.py](app/payment/deduction.py) / [refund.py](app/payment/refund.py) | 幂等、锁、事务、退款与补偿 |
+| 前端流式交互 | [sse.ts](frontend/src/api/sse.ts) / [chat.ts](frontend/src/stores/chat.ts) | 跨 chunk 攒帧、序号守卫、会话状态管理 |
+
+## 技术栈
+
+Python · FastAPI · asyncio · PostgreSQL（pgvector / pg_trgm）· Redis · Vue 3 · TypeScript · Vite · Docker Compose · Nginx · SSE · DeepSeek / Qwen · Prometheus / Grafana / Loki / Tempo
+
+## 仓库结构
+
+```text
+app/                 后端核心：agents / services / routing / payment / core
+frontend/            Vue 3 前端与 SSE 流式交互
+showcase/            面向招聘方的项目展示与核心代码导读
+agent_docs/          脱敏后的 Bug 日志与修复台账
+alembic/             数据库版本化迁移
+deploy/              部署相关配置
+tests/               测试与评测代码快照
+可复用代码/           分布式锁、熔断器、单飞幂等、LRU+TTL、限流器
+可复用资产/           跨项目模板、MCP 与技能资产
+```
+
+## 同步说明
+
+本仓是脱敏展示快照，核心代码同步自私有主仓。修复台账随仓公开；评测语料、线上密钥、运维细节和内部复盘不进入公开仓库。对外数字只保留可解释、可追溯且明确标注为自测的口径。
