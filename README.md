@@ -2,7 +2,7 @@
 
 一套可插拔的 Multi-Agent / RAG 网关：同一套引擎承载多业务场景，统一处理意图路由、知识检索、工具调用、流式回答、计费与可观测运维。当前落地民法典咨询与旅游规划，架构可迁移到企业知识库、合同审查、客服质检等企业服务场景。
 
-[在线演示](https://the-world-agent.cloud) · [项目展示](showcase/README.md) · [核心代码导读](showcase/core/README.md)
+[在线演示](https://the-world-agent.cloud) · [项目展示](showcase/README.md) · [核心代码索引](#核心代码索引)
 
 ## 项目定位
 
@@ -10,7 +10,7 @@
 
 - **业务可复用**：Agent 引擎与业务配置分离。新增场景主要增加配置包，不复制一套网关。
 - **答案可追溯**：知识问答走 pgvector 与 pg_trgm 双路召回、RRF 融合和 CrossEncoder 重排；回答引用法条，零召回直接拒答。
-- **工程可交付**：除模型调用外，还包含 SSE 流式链路、认证限流、语义缓存、支付一致性、迁移、回滚和线上排障。
+- **工程可交付**：除模型调用外，还包含 SSE 流式链路、认证限流、语义缓存、迁移、回滚和线上排障；支付与内部运维实现保留在私有主仓。
 
 ## 架构
 
@@ -25,7 +25,7 @@ flowchart LR
     ROUTE -->|复杂任务| REACT[ReAct · Multi-Agent 圆桌]
     ROUTE -->|知识问答| RAG[双路召回 -> RRF -> CrossEncoder]
     TOOL & REACT & RAG --> LLM[DeepSeek / Qwen]
-    REACT & RAG --> PG[(PostgreSQL<br/>pgvector · 支付流水)]
+    REACT & RAG --> PG[(PostgreSQL<br/>pgvector · 会话与知识)]
     CACHE & REACT --> RD[(Redis<br/>缓存 · 限流 · 锁)]
     PG & RD --> OUT
 ```
@@ -50,7 +50,7 @@ flowchart LR
 
 - 在线体验：https://the-world-agent.cloud
 - 项目说明：[showcase/README.md](showcase/README.md)
-- 核心代码导读：[showcase/core/README.md](showcase/core/README.md)
+- 核心代码索引：[当前页面](#核心代码索引)
 
 ## 核心代码索引
 
@@ -64,7 +64,6 @@ flowchart LR
 | 流式网关 | [chat_stream_core.py](app/services/chat_stream_core.py) / [stream_utils.py](app/core/stream_utils.py) | SSE 分帧、工具分发、流式错误收口 |
 | 语义缓存 | [semantic_cache.py](app/core/semantic_cache.py) | 多级缓存、上下文隔离键、抗雪崩 |
 | 认证与保护 | [auth.py](app/middleware/auth.py) / [rate_limit.py](app/middleware/rate_limit.py) | JWT 轮换、Redis 分布式限流、熔断降级 |
-| 支付一致性 | [service.py](app/payment/service.py) / [deduction.py](app/payment/deduction.py) / [refund.py](app/payment/refund.py) | 幂等、锁、事务、退款与补偿 |
 | 前端流式交互 | [sse.ts](frontend/src/api/sse.ts) / [chat.ts](frontend/src/stores/chat.ts) | 跨 chunk 攒帧、序号守卫、会话状态管理 |
 
 ## 技术栈
@@ -74,17 +73,12 @@ Python · FastAPI · asyncio · PostgreSQL（pgvector / pg_trgm）· Redis · Vu
 ## 仓库结构
 
 ```text
-app/                 后端核心：agents / services / routing / payment / core
+app/                 后端核心：agents / services / routes / core
 frontend/            Vue 3 前端与 SSE 流式交互
-showcase/            面向招聘方的项目展示与核心代码导读
-agent_docs/          脱敏后的 Bug 日志与修复台账
-alembic/             数据库版本化迁移
-deploy/              部署相关配置
-tests/               测试与评测代码快照
+showcase/            面向招聘方的项目展示
 可复用代码/           分布式锁、熔断器、单飞幂等、LRU+TTL、限流器
-可复用资产/           跨项目模板、MCP 与技能资产
 ```
 
 ## 同步说明
 
-本仓是脱敏展示快照，核心代码同步自私有主仓。修复台账随仓公开；评测语料、线上密钥、运维细节和内部复盘不进入公开仓库。对外数字只保留可解释、可追溯且明确标注为自测的口径。
+本仓是脱敏展示快照，核心代码同步自私有主仓。支付模块、修复台账、部署配置、评测原始数据和内部复盘不进入公开仓库。对外数字只保留可解释、可追溯且明确标注为自测的口径。
