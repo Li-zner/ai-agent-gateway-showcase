@@ -48,6 +48,8 @@ flowchart LR
 
 ## Demo
 
+![在线演示入口](showcase/assets/demo-login.png)
+
 - 在线体验：https://the-world-agent.cloud
 - 项目说明：[showcase/README.md](showcase/README.md)
 - 核心代码索引：[当前页面](#核心代码索引)

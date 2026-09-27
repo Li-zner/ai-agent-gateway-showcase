@@ -52,5 +52,6 @@ Python · FastAPI · PostgreSQL（向量检索）· Redis · Docker Compose · N
 
 ## 演示
 
+![在线演示入口](assets/demo-login.png)
+
 - 公网：https://the-world-agent.cloud
-- 百度网盘：https://pan.baidu.com/s/1ProMzaj1ANz_NdQloEKGTw?pwd=sj4b
