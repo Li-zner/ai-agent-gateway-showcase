@@ -10,7 +10,8 @@ from fastapi.responses import JSONResponse
 from ..core.logging import setup_logging
 from ..core.db import get_pool
 from ..core.config import (
-    PASSWORD_MAX_BYTES, TRUST_PROXY_HEADERS, peer_is_trusted_proxy,
+    PASSWORD_MAX_BYTES, TRUST_PROXY_HEADERS, is_plausible_client_ip,
+    peer_is_trusted_proxy,
 )
 from ..core.auth_cookies import (
     ACCESS_COOKIE,
@@ -48,10 +49,10 @@ return c
 
 
 def _client_ip(request: Request) -> str:
-    """取可信客户端 IP。Cloudflare Tunnel 链路以 CF-Connecting-IP 为准。
+    """取可信客户端 IP。Cloudflare 代理链路以 CF-Connecting-IP 为准。
 
-    生产链路是 Cloudflare Tunnel -> nginx；CF 头由隧道入口写入。没有该头时
-    回退 X-Forwarded-For 末跳（直连 nginx 场景），不采信首跳用户可控值。
+    生产链路是 Cloudflare -> nginx；CF 头由边缘写入。没有该头时回退
+    X-Forwarded-For（取法见函数内注释），不采信用户可控的链头值。
 
     RT-1（2026-09-19 审查）：转发头本身可被直连端口者伪造，伪造一次即绕
     登录失败锁 / 短信 IP 日限额 / oauth 限频。故默认只信 socket 对端地址，
@@ -63,17 +64,33 @@ def _client_ip(request: Request) -> str:
     门禁：任意同网段容器自报 CF-Connecting-IP 就能把爆破锁/日限额甩给别人的
     IP 桶。现在对端必须精确命中 TRUSTED_PROXY_CIDRS（默认仅 127.0.0.1/32，
     生产按反代实际网段配置），判据与 HSTS 共用 core.config 同一处。
+    2026-09-28 审查（ECS 直挂公网）：命中反代判据后原先**无条件**采信头值，而
+    CF-Connecting-IP 可以是任意字符串（内网、组播、::ffff:、空）。现在过一道
+    is_plausible_client_ip，脏值不再污染 IP 桶；被拒时退回 socket 对端而不是
+    "unknown"——全站共用一个 unknown 桶等于给攻击者一个可投毒的公共桶，而对端
+    地址由内核决定、访客伪造不了。
+    2026-09-28 批1 审读 A-P1-1：同轮留下的 XFF 回退取的是**末跳**，而 nginx 用
+    $proxy_add_x_forwarded_for 把自己的 socket 对端追加在链尾——现网那个对端正是
+    CF 出口地址，于是命中回退的访客全被记成同一个桶（限流额度变全站共享）。改为
+    从右往左跳过 TRUSTED_PROXY_CIDRS 里的地址，第一个非可信反代的跳即访客。
     """
     peer = request.client.host if request.client else ""
     if not (TRUST_PROXY_HEADERS or peer_is_trusted_proxy(peer)):
         return peer or "unknown"
     cf_ip = request.headers.get("cf-connecting-ip", "").strip()
-    if cf_ip:
+    if is_plausible_client_ip(cf_ip):
         return cf_ip
-    ip = (request.headers.get("x-forwarded-for") or peer)
-    if ip and "," in ip:
-        ip = ip.split(",")[-1].strip()
-    return ip or "unknown"
+    # XFF 要**从右往左**取第一个不在可信反代网段里的地址。末跳是错的：nginx 用
+    # $proxy_add_x_forwarded_for 把自己的 socket 对端追加在链尾，而现网那个对端就是
+    # CF 出口地址（2026-09-28 批1 审读 A-P1-1）——取末跳等于把命中这条回退的访客
+    # 全塞进同一个桶，登录锁 5 次/15 分与短信 20 条/日都变成全站共享额度。
+    # 也不取首跳：链头由最外层写入之前，任何中间环节都可伪造。
+    xff = request.headers.get("x-forwarded-for") or ""
+    for hop in reversed([h.strip() for h in xff.split(",") if h.strip()]):
+        if peer_is_trusted_proxy(hop):
+            continue
+        return hop if is_plausible_client_ip(hop) else (peer or "unknown")
+    return peer or "unknown"
 
 
 async def _check_login_lock(ip: str, username: str):

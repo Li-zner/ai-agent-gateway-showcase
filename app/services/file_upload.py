@@ -41,8 +41,10 @@ MAX_TEXT_CONTENT = 200 * 1024
 # 上传门禁（2026-09-19 审查 routes R3）：/v2/upload 曾是唯一无频控的登录写入口。
 # 只挂 check_qps 不够——user_qps_limit 默认 2000/s（config.py:112），对"每次 20MB 磁盘
 # IO + 线程池解析 + 200KB 入 Redis"的重接口等于不设防，故另加每小时次数配额。
-UPLOAD_HOURLY_LIMIT_USER = max(1, int(os.getenv("USER_UPLOAD_HOURLY_LIMIT", "30")))
-UPLOAD_HOURLY_LIMIT_ADMIN = max(1, int(os.getenv("ADMIN_UPLOAD_HOURLY_LIMIT", "300")))
+# `or "30"`：env 存在但为空串（compose 常见 `KEY=` 写法）时回退默认，
+# 不再让 int("") 在 import 期炸掉启动且不报键名（2026-09-28 批1 长尾 P2）
+UPLOAD_HOURLY_LIMIT_USER = max(1, int(os.getenv("USER_UPLOAD_HOURLY_LIMIT") or "30"))
+UPLOAD_HOURLY_LIMIT_ADMIN = max(1, int(os.getenv("ADMIN_UPLOAD_HOURLY_LIMIT") or "300"))
 
 
 def _stream_upload_to_disk(src, path: str, max_bytes: int) -> int:

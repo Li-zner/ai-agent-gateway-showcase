@@ -67,7 +67,13 @@ async def set_user_active(params: dict) -> dict:
 
 
 async def rollback_user_active(params: dict, result: dict) -> dict:
-    """按快照恢复 is_active 原值；本次未改动时直接判定回滚成功。"""
+    """按快照恢复 is_active 原值；本次未改动时直接判定回滚成功。
+
+    2026-09-28 批1 P2-11：回滚前 FOR UPDATE 重读并复核 PROTECTED_ROLES——
+    动作与回滚之间账号可能已被提权为 admin，照旧回滚就绕过了"管理员不允许启停"
+    的保护；顺带补存在性判断（用户不存在不再靠"回读不一致"兜底）。两种拒绝都按
+    框架约定返回 passed=False 转人工，不抛业务错。
+    """
     from ..core.db import get_pool
     from ..core.quota import invalidate_user_cache
 
@@ -78,12 +84,23 @@ async def rollback_user_active(params: dict, result: dict) -> dict:
     username = str(params["username"])
     pool = await get_pool()
     async with pool.acquire(timeout=5) as conn:
-        await conn.execute(
-            "UPDATE users SET is_active=$2 WHERE username=$1",
-            username, bool(was_active),
-        )
-        restored = await conn.fetchval(
-            "SELECT is_active FROM users WHERE username=$1", username)
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT role FROM users WHERE username=$1 FOR UPDATE", username)
+            if row is None:
+                # 框架约定：回滚函数不抛业务错（路由层无 except ValueError，抛了变 500），
+                # 用 passed=False 让动作标 failed、原因落 rollback_result，转人工
+                return {"passed": False, "reason": f"用户不存在，无法回滚: {username}"}
+            if (row["role"] or "user") in PROTECTED_ROLES:
+                return {"passed": False,
+                        "reason": f"账号 {username} 已是受保护角色，"
+                                  "禁止回滚启停（提权发生在动作之后，请人工处理）"}
+            await conn.execute(
+                "UPDATE users SET is_active=$2 WHERE username=$1",
+                username, bool(was_active),
+            )
+            restored = await conn.fetchval(
+                "SELECT is_active FROM users WHERE username=$1", username)
     await invalidate_user_cache(username)
     return {"passed": bool(restored) is bool(was_active),
             "restored_active": restored}

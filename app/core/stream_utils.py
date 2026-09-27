@@ -120,31 +120,50 @@ async def stream_llm(api_key: str, model: str, messages: list, *,
                             yield {"type": "tool_calls", "delta": delta["tool_calls"]}
 
 
+# 消毒侧的处理上限。注意与进模型的量不同：调用点 build_file_context 还会对消毒
+# 结果再切 `[:8000]` 才拼进 prompt，所以这里大于 8000 的部分只影响耗时不影响输出。
+_UPLOAD_MAX_CHARS = 50000
+# 注入话术模式：锚点与目标词之间用 `[^\n]{0,60}?`（不跨行、最多 60 字）而不是
+# `.*?`。真实注入都在同一行内几十字（"忽略以上的所有指令"），60 字足够；而 `.*?`
+# 未定界会让**每个锚点**把剩余文本扫一遍，耗时 = 锚点密度 × 剩余长度（见下方函数注释）。
+# 检出面只收窄一处：同一行内跨度超过 60 字的构造不再判中（跨行本来就不匹配，
+# `.` 默认不吃换行）。这是一次有意的取舍——本函数按 C5 口径只是轻量防御，
+# 不是信任边界，边界在"文件内容只注入给上传者本人"（见 build_file_context）。
+_INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE) for p in (
+        r"忽略(之前|以上|前面)[^\n]{0,60}?指令",
+        r"忽略[^\n]{0,60}?system\s*(?:prompt|message|instruction)",
+        r"ignore\s+(?:all\s+)?(?:previous|above|prior)\s+instructions",
+        r"你(?:现在|已经)[^\n]{0,60}?是[^\n]{0,60}?(?:系统|管理员|root)",
+        r"你现在[^\n]{0,60}?扮演",
+        r"返回[^\n]{0,60}?(?:密码|密钥|token|secret|key)",
+        r"输出[^\n]{0,60}?(?:密码|密钥|token|secret|key)",
+        r"你是[^\n]{0,60}?(?:管理员|root|admin|superuser)",
+        r"system\s*[：:][^\n]{0,60}?(?:you are|你)",
+        r"从现在开始",
+    )
+)
+
+
 def sanitize_uploaded_content(content: str) -> str:
     """安全过滤上传文件内容，防止提示词注入（原 v2.py _sanitize_uploaded_content）
 
     注（C5）：单次替换为轻量防御，理论上替换后仍可能组合成新注入；
     完整防护需多重迭代替换/完全过滤可疑字符，当前风险可接受。
+
+    注（复杂度）：先截断再匹配。这段跑在事件循环上（调用点
+    chat_stream_ctx.py:161），原先是"整篇扫完才截断"，配合未定界的 `.*?`，耗时
+    = 锚点密度 × 剩余长度：2026-09-28 用改动前的原函数实测 50000 字、每 6 字一个
+    "忽略以上"锚点的文本要 7.757s（每 4 字锚点 11.336s），改后同一输入 0.019s。
+    file_id 有 1 小时 TTL 可反复复用，单个上传者即可独占 worker 十几秒。
     """
     if not content:
         return content
-    injection_patterns = [
-        r'(?i)忽略(之前|以上|前面).*?指令',
-        r'(?i)忽略.*?system\s*(?:prompt|message|instruction)',
-        r'(?i)ignore\s+(?:all\s+)?(?:previous|above|prior)\s+instructions',
-        r'(?i)你(?:现在|已经).*?是.*?(?:系统|管理员|root)',
-        r'(?i)你现在.*?扮演',
-        r'(?i)返回.*?(?:密码|密钥|token|secret|key)',
-        r'(?i)输出.*?(?:密码|密钥|token|secret|key)',
-        r'(?i)你是.*?(?:管理员|root|admin|superuser)',
-        r'(?i)system\s*[：:].*?(?:you are|你)',
-        r'(?i)从现在开始',
-    ]
-    for pat in injection_patterns:
-        content = re.sub(pat, '【内容已过滤】', content)
-    max_chars = 50000
-    if len(content) > max_chars:
-        content = content[:max_chars] + f"\n\n...（文件过长，仅截取前 {max_chars} 字符）"
+    if len(content) > _UPLOAD_MAX_CHARS:
+        content = (content[:_UPLOAD_MAX_CHARS]
+                   + f"\n\n...（文件过长，仅截取前 {_UPLOAD_MAX_CHARS} 字符）")
+    for pat in _INJECTION_PATTERNS:
+        content = pat.sub('【内容已过滤】', content)
     return content
 
 

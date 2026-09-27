@@ -202,6 +202,22 @@ async def answer_from_rows(question: str, sql: str, columns: list[str],
         return "（结论生成失败，以下为原始查询结果）"
 
 
+def _dedupe_columns(names) -> list[str]:
+    """SELECT 重名列（u1.name, u2.name 忘加别名）时后列加 _N 后缀。
+
+    asyncpg 的 keys() 原样返回重名、r[c] 恒取后值，直接 `{c: r[c] for c in columns}`
+    会让前列的值被静默覆盖（2026-09-28 批1 P2-12）。列名唯一时原样返回，行为不变。
+    """
+    if len(set(names)) == len(names):
+        return list(names)
+    seen: dict[str, int] = {}
+    out = []
+    for n in names:
+        seen[n] = seen.get(n, 0) + 1
+        out.append(n if seen[n] == 1 else f"{n}_{seen[n]}")
+    return out
+
+
 async def ask_data(question: str, history: list[dict] | None = None) -> dict:
     """问数主流程。入参问题文本与可选历史；返回 sql/columns/rows/truncated/answer。
 
@@ -224,8 +240,9 @@ async def ask_data(question: str, history: list[dict] | None = None) -> dict:
         return {"sql": sql, "columns": [], "rows": [], "row_count": 0,
                 "truncated": False, "elapsed_ms": elapsed_ms,
                 "answer": "查询成功但没有匹配数据。"}
-    columns = list(records[0].keys())
-    rows = [{c: _json_safe(r[c]) for c in columns} for r in records]
+    columns = _dedupe_columns(records[0].keys())
+    # 按 values() 的位置序 zip 列名：重名时 r[c] 取后值，位置序才能拿到每一列自己的值
+    rows = [dict(zip(columns, (_json_safe(v) for v in r.values()))) for r in records]
     truncated = len(rows) >= MAX_ROWS
     columns, rows = _redact_rows(columns, rows)
     answer = await answer_from_rows(text, sql, columns, rows)

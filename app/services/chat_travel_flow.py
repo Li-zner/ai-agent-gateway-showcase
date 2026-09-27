@@ -112,10 +112,18 @@ async def build_travel_state(ctx: ChatStreamCtx) -> dict:
 
 
 async def persist_travel_slot(ctx: ChatStreamCtx, slot: str, value: str) -> None:
-    """把确认后的旅行槽位写入会话画像；画像失败不影响本轮工具查询。"""
+    """把确认后的旅行槽位写入会话画像；画像失败不影响本轮工具查询。
+
+    2026-09-28 批1 长尾 P2：docstring 一直这么承诺，但裸 await 在 pool.acquire
+    抛错时会冒泡到 chat_stream_core 降级成无工具裸聊——兑现承诺，失败只记日志。
+    """
     updater = getattr(ctx.mm, "update_profile_fields", None)
-    if callable(updater):
+    if not callable(updater):
+        return
+    try:
         await updater({slot: value})
+    except Exception:
+        logger.exception(f"旅行槽位写画像失败（不影响本轮查询）: slot={slot}")
 
 
 def _pending_is_fresh(pending: dict) -> bool:

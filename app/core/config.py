@@ -304,6 +304,38 @@ def peer_is_trusted_proxy(host: str) -> bool:
     return any(ip in net for net in TRUSTED_PROXY_CIDRS)
 
 
+# IANA 保留的文档用网段（RFC 5737），仅作合成测试地址，公网不可路由
+_DOCUMENTATION_NETS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"))
+
+
+def is_plausible_client_ip(value: str) -> bool:
+    """转发头里的"客户端 IP"是否像真实公网访客（供 auth._client_ip 采用前过一遍）。
+
+    反代命中 TRUSTED_PROXY_CIDRS 只说明"这条连接来自我们信的入口"，不说明入口
+    写进来的头值合理：nginx 走 bridge 网段时访客自报的 CF-Connecting-IP 会被原样
+    透传，内网/组播/::ffff: 这类脏值会把按 IP 的登录锁与短信日额度打进无意义桶。
+    本判据只挡这类值，**不是安全边界**——伪造一个公网可路由地址仍然可能，真正
+    封住伪造要靠"非 CF 来源连不到网关端口"（compose 不发布端口 + 安全组只放 CF）。
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return False
+    try:
+        ip = ipaddress.ip_address(raw)
+    except ValueError:
+        return False
+    if getattr(ip, "ipv4_mapped", None) is not None:
+        return False
+    # IANA 文档段（TEST-NET）在 Python 里也算 is_private，但伪造它只会落进一个
+    # 不可路由的空桶，无害；本仓十余处测试夹具正是拿这些地址当合成访客 IP。
+    if any(ip in net for net in _DOCUMENTATION_NETS):
+        return True
+    return not (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_multicast or ip.is_reserved or ip.is_unspecified)
+
+
 METRICS_TOKEN_CFG = _settings.metrics_token
 DB_ACQUIRE_TIMEOUT = _settings.db_acquire_timeout
 DB_COMMAND_TIMEOUT = _settings.db_command_timeout

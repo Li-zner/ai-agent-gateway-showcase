@@ -164,6 +164,24 @@ def _referenced_tables(masked: str, cte_aliases: set[str]) -> list[str]:
     return [t for t in tables if t not in cte_aliases]
 
 
+# 最外层 LIMIT 的行数判据。Postgres 里 LIMIT/OFFSET 属于最外层 SELECT，子查询与
+# CTE 体里的同名子句都被括号包住、不会贴在语句末尾，所以"末尾那个 LIMIT"才是
+# 真正约束返回行数的一个。写成"文本里任意一个 limit"会出两类错（2026-09-28 批1 P1-8）：
+# `WITH d AS (SELECT ... LIMIT 5) SELECT ... FROM d` 既骗过了上限校验（以为已限 5 行），
+# 又让 with_row_limit 以为"已经有限行"而不再包外层 → 200 行硬上限整体失效。
+_TAIL_LIMIT_RE = re.compile(r"\blimit\s+(\d+)\b(?:\s+offset\s+\d+\b)?\s*$", re.IGNORECASE)
+
+
+def _tail_limit(sql: str) -> int | None:
+    """取最外层 LIMIT 的行数；没有则 None。字面量先遮蔽，防 `WHERE name='limit 9'` 骗判据。
+
+    认不出的写法（`LIMIT ALL`、以行注释收尾的 `LIMIT 5 -- 说明`）一律返回 None，
+    方向是 fail-safe：外层照样会被包一层 LIMIT，只会多包不会漏包。
+    """
+    match = _TAIL_LIMIT_RE.search(_mask_literals(sql))
+    return int(match.group(1)) if match else None
+
+
 def guard_sql(raw: str) -> str:
     """校验模型产出的 SQL，返回去掉尾分号的单条只读查询。
 
@@ -206,8 +224,9 @@ def guard_sql(raw: str) -> str:
                 f"表 {table} 不在只读白名单内（可用表: {', '.join(sorted(ALLOWED_TABLES))}）")
     # 自带 LIMIT 只有"缺失"时好包一层，写超了得直接拒：静默改写会让操作者
     # 在界面上看到的 SQL 与实际执行的不一致，排障时反而误导。
-    limit_match = re.search(r"\blimit\s+(\d+)\b", lowered)
-    if limit_match and int(limit_match.group(1)) > MAX_ROWS:
+    # 只看最外层那一个（P1-8）：CTE 或子查询体内的 LIMIT 不约束本查询返回行数。
+    tail_rows = _tail_limit(sql)
+    if tail_rows is not None and tail_rows > MAX_ROWS:
         raise SqlRejectedError(f"LIMIT 不得超过 {MAX_ROWS} 行")
     return sql
 
@@ -219,7 +238,13 @@ def with_row_limit(sql: str, max_rows: int = MAX_ROWS) -> str:
     报错给操作者没有价值。模型自带 LIMIT 的情况已在 guard_sql 里按上限校验过，
     所以这里只需处理"缺失 LIMIT"。截断由上层按"返回行数达到上限"标记 truncated，
     不额外多取一行，也不重扫结果。
+
+    判据与 guard_sql 必须同一个（P1-8）：原先这里看"文本任意处有没有 limit"，
+    于是 CTE 体内写了 LIMIT 的无外层限行查询两头都以为安全，实际一行都没限。
+
+    换行包裹（P1-8 连带）：以行注释收尾的语句若同行拼接，`--` 会把右括号连同
+    外层 LIMIT 一起注释掉，交给数据库只剩语法错误。
     """
-    if re.search(r"\blimit\b", sql, re.IGNORECASE):
+    if _tail_limit(sql) is not None:
         return sql
-    return f"SELECT * FROM ({sql}) AS _ask_limited LIMIT {max_rows}"
+    return f"SELECT * FROM (\n{sql}\n) AS _ask_limited LIMIT {max_rows}"

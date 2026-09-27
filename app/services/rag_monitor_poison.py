@@ -50,8 +50,6 @@ async def note_failure(conn, source: str, source_id: int,
     attempts = _fail_counts.get(key, 0) + 1
     if attempts < limit:
         _fail_counts[key] = attempts
-    else:
-        _fail_counts.pop(key, None)
     logger.warning(f"RAG 监测 {source} 侧行 {source_id} 落库失败"
                    f"（第 {attempts}/{limit} 次）: {type(exc).__name__}: {exc}")
     if attempts < limit:
@@ -59,10 +57,14 @@ async def note_failure(conn, source: str, source_id: int,
     try:
         await _mark_poison(conn, source, source_id)
     except Exception as mark_exc:
-        # 连终态标记都写不进（多半是连接已失效）：保持原行为，下轮再试
+        # 连终态标记都写不进（多半是连接已失效）：保持原行为，下轮再试。
+        # 2026-09-28 批1 长尾 P2：计数此刻**不能**清——清了下一轮从 1 重爬，
+        # 毒行反而无限重试；计数停在 limit-1，下轮再次到顶、再次尝试标记
         logger.warning(f"RAG 监测 poison 标记写入失败（下轮重试）: "
                        f"{type(mark_exc).__name__}: {mark_exc}")
         return
+    # 标记已确定性落库，才清计数（原实现 pop 在标记之前，标记失败即归零重爬）
+    _fail_counts.pop(key, None)
     logger.error(f"RAG 监测：行 {source}#{source_id} 连续 {attempts} 次落库失败，"
                  f"已标记 status='poison' 退出队列；规则集升版后会自动重试，"
                  f"请按上一条 warning 的异常定位该行。")

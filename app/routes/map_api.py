@@ -12,10 +12,11 @@ from .auth import _client_ip
 from .map_utils import is_reserved_ip, weather_candidates
 from .map_amap import plan_amap_route
 # 共享池的并入/抽样在 services（09-22 审查 P2：合并要收进单条 Lua 脚本，
-# 本文件已贴 600 行门禁）；键前缀与池参数一并从那里导入，避免两处定义漂移
+# 本文件已贴 600 行门禁）；键前缀从那里导入，避免两处定义漂移
+# （2026-09-28 批1 长尾 P2：迁移后本文件只还用 CITY_CACHE_PREFIX，
+# RECOMMEND_PICK/POOL_MAX/TTL_SECONDS 三个零使用名字已从 import 摘除）
 from ..services.map_recommend_pool import (
-    CITY_CACHE_PREFIX, RECOMMEND_PICK, RECOMMEND_POOL_MAX,
-    RECOMMEND_TTL_SECONDS,
+    CITY_CACHE_PREFIX,
     recommend_pick_from_pool as _recommend_pick_from_pool,
     recommend_pool_put as _recommend_pool_put,
 )

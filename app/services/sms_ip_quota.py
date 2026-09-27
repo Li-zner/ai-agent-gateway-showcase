@@ -14,8 +14,15 @@ SMS_IP_DAY_LIMIT = 20
 
 
 def ip_day_key(ip: str) -> str:
-    """IP 日计数键名；预检与落账共用同一个构造口，防两处拼写漂移。"""
-    return f"phone_sms_ip_day:{ip}"
+    """IP 日计数键名；预检与落账共用同一个构造口，防两处拼写漂移。
+
+    2026-09-28 批1 长尾 P2：键带自然日后缀——原键无日期、TTL 只在首次 INCR 置 86400，
+    实为"自首条滚动 24h"，与 429 文案"明日再试"不符；按自然日切键后文案成立。
+    日期用 UTC，与 daily_token 门禁同一日切口径。
+    """
+    from datetime import datetime, timezone
+    day = datetime.now(timezone.utc).strftime("%Y%m%d")
+    return f"phone_sms_ip_day:{ip}:{day}"
 
 
 async def assert_ip_day_headroom(ip: str) -> None:
