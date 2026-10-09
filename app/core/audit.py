@@ -21,6 +21,10 @@ ACT_RAG_ASK = "rag_ask"
 ACT_RAG_DATA_ASK = "rag_data_ask"
 ACT_RAG_ACTION_PROPOSE = "rag_action_propose"
 ACT_RAG_CONTENT_VIEW = "rag_content_view"
+ACT_DBAGENT_TASK = "dbagent_task"
+ACT_DBAGENT_WRITE_APPROVAL = "dbagent_write_approval"
+ACT_DBAGENT_PLAN_APPROVAL = "dbagent_plan_approval"
+ACT_DBAGENT_CHANGE_ROLLBACK = "dbagent_change_rollback"
 
 
 async def audit(user_id: str, action: str, detail: dict | None = None) -> None:

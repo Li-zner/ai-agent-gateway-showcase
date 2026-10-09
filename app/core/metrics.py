@@ -219,3 +219,60 @@ background_loop_stopped_total = Counter(
     '后台循环退出次数（按循环名与原因）',
     ['loop', 'reason']
 )
+
+# ============================================================
+# DB Agent 观测（2026-10-03 #6：任务计量/审批门/回滚/守卫/夜跑）
+# ============================================================
+dbagent_tasks_total = Counter(
+    'dbagent_tasks_total',
+    'DB Agent 任务终态数',
+    ['status']  # done / failed
+)
+dbagent_task_duration_seconds = Histogram(
+    'dbagent_task_duration_seconds',
+    'DB Agent 任务端到端耗时（含人工审批等待）',
+    buckets=(5, 15, 30, 60, 120, 240, 480, 960)
+)
+dbagent_task_steps = Histogram(
+    'dbagent_task_steps',
+    'DB Agent 任务步数（工具调用轮数）',
+    buckets=(1, 2, 3, 4, 6, 8, 12, 16, 20, 30, 40)
+)
+dbagent_llm_tokens_total = Counter(
+    'dbagent_llm_tokens_total',
+    'DB Agent LLM token 消耗（含重试）',
+    ['type']  # input / output
+)
+dbagent_llm_fallbacks_total = Counter(
+    'dbagent_llm_fallbacks_total',
+    'DB Agent 跨供应商兜底通道触发（P1-1）',
+    ['outcome']  # invoked / success / failed
+)
+dbagent_gate_decisions_total = Counter(
+    'dbagent_gate_decisions_total',
+    'DB Agent 审批门决定',
+    # decision=approved/rejected 是人工决定；auto_rejected 是 300s 超时自动否决（P1-3）
+    ['gate', 'decision']
+)
+dbagent_rollbacks_total = Counter(
+    'dbagent_rollbacks_total',
+    '回滚执行结果',
+    ['result']  # ok / failed / blocked（冲突拒绝）
+)
+dbagent_guard_rejects_total = Counter(
+    'dbagent_guard_rejects_total',
+    'SQL 守卫拒绝次数',
+    ['kind']  # read / write
+)
+dbagent_nightly_eval_last_passed = Gauge(
+    'dbagent_nightly_eval_last_passed',
+    '最近一次黄金评测夜跑通过例数'
+)
+dbagent_nightly_eval_last_total = Gauge(
+    'dbagent_nightly_eval_last_total',
+    '最近一次黄金评测夜跑总例数'
+)
+dbagent_nightly_eval_last_run_timestamp_seconds = Gauge(
+    'dbagent_nightly_eval_last_run_timestamp_seconds',
+    '黄金评测夜跑最近完成时间戳'
+)

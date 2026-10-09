@@ -80,6 +80,12 @@ class _Settings(BaseSettings):
     deepseek_model: str = "qwen3.7-flash"
     deepseek_flash_model: str = "deepseek-flash"
     deepseek_fallback_message: str = "服务器繁忙，请稍后再提问吧！"
+    # DB Agent 模型档位与连接池 DSN（与私有主仓同名同默认值；真实凭据只走 .env/环境变量）
+    llm_primary_model: str = "qwen3.7-flash"
+    llm_fallback_model: str = "deepseek-flash"
+    llm_last_resort_model: str = "qwen3.7-flash"
+    dbagent_readonly_dsn: str = ""
+    dbagent_write_dsn: str = ""
     llm_enable_thinking: bool = False
 
     # ---------- Qwen（阿里云百炼 OpenAI 兼容端点；主力模型为 qwen 系时使用）----------
@@ -214,6 +220,11 @@ DEEPSEEK_API_TIMEOUT = _settings.deepseek_api_timeout
 DEEPSEEK_MODEL = _settings.deepseek_model
 DEEPSEEK_FLASH_MODEL = _settings.deepseek_flash_model
 DEEPSEEK_FALLBACK_MESSAGE = _settings.deepseek_fallback_message
+DBAGENT_READONLY_DSN = _settings.dbagent_readonly_dsn
+DBAGENT_WRITE_DSN = _settings.dbagent_write_dsn
+LLM_PRIMARY_MODEL = _settings.llm_primary_model
+LLM_FALLBACK_MODEL = _settings.llm_fallback_model
+LLM_LAST_RESORT_MODEL = _settings.llm_last_resort_model
 LLM_ENABLE_THINKING = _settings.llm_enable_thinking
 RERANK_SIM_THRESHOLD = _settings.rerank_sim_threshold
 LLM_TEMPERATURE = _settings.llm_temperature
