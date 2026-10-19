@@ -219,9 +219,16 @@ class CdcJournal:
         self._ensure_dir()
         out = []
         for name in sorted(os.listdir(self.journal_dir)):
+            if name.startswith("checkpoint"):
+                continue
             p = os.path.join(self.journal_dir, name)
-            if os.path.isfile(p) and not name.startswith("checkpoint"):
-                out.append({"name": name, "size": os.path.getsize(p)})
+            try:
+                if os.path.isfile(p):
+                    out.append({"name": name, "size": os.path.getsize(p)})
+            except OSError:
+                # isfile 与 getsize 之间被 prune_old_files 删除（TOCTOU）：跳过即可，
+                # 状态接口不因清理竞态 500（2026-10-06 审阅债转修）
+                continue
         return out
 
     def close(self):

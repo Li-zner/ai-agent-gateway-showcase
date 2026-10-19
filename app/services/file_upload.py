@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from ..core.logging import setup_logging
-from ..core.redis import get_redis
+from ..core.redis import get_redis, incr_arm_ttl, sadd_touch_ttl
 
 logger = setup_logging()
 
@@ -83,10 +83,12 @@ async def extract_text_content_async(filepath: str, filename: str) -> str:
     except Exception:
         raise ValueError("无法解码文件内容，请确保文件为 UTF-8 或 GBK 编码的文本文件")
 
-    # 限制内容长度，避免超出 token 限制
-    max_chars = 50000
-    if len(content) > max_chars:
-        content = content[:max_chars] + f"\n\n...（文件过长，仅截取前 {max_chars} 字符）"
+    # 与全链路同一上限（2026-09-28 统一 40000，原 5 万与解析层 15 万并存），
+    # 超出头部标注——放头部，下游按任意长度再切片都不会把标注切掉
+    from ..core.stream_utils import UPLOAD_TEXT_MAX_CHARS
+    if len(content) > UPLOAD_TEXT_MAX_CHARS:
+        content = (f"[文件过长已截断：原文约 {len(content)} 字，以下仅保留前 "
+                   f"{UPLOAD_TEXT_MAX_CHARS} 字]\n" + content[:UPLOAD_TEXT_MAX_CHARS])
     return content
 
 
@@ -135,8 +137,9 @@ async def _check_upload_gates(username: str, role: str) -> None:
     key = f"upload_quota:{username}:{bucket}"
     try:
         r = await get_redis()
-        count = int(await r.incr(key))
-        await r.expire(key, 2 * 3600)  # 跨小时留一倍缓冲，便于排障看当小时用量
+        # 计数与 TTL 一次原子下发（2026-10-08 第四轮 D1）：分两条命令时，进程在
+        # INCR 与 EXPIRE 之间被杀会留下无 TTL 的小时桶键，白占内存且永不回收
+        count = await incr_arm_ttl(r, key, 2 * 3600)  # 跨小时留一倍缓冲，便于排障看当小时用量
     except Exception as e:
         logger.warning(f"上传配额检查失败（放行）: {e}")
         return
@@ -144,13 +147,23 @@ async def _check_upload_gates(username: str, role: str) -> None:
         raise HTTPException(429, f"每小时上传次数已达上限（{limit} 次），请稍后再试")
 
 
+def _clip_to_redis_bytes(text: str, safe_filename: str = "") -> str:
+    """Redis 存储防线：按 UTF-8 字节截到 MAX_TEXT_CONTENT（见 handle_upload 内注释）。
+
+    字节截断可能切断多字节字符尾部，errors="ignore" 丢弃残字。
+    """
+    raw = text.encode("utf-8", errors="ignore")
+    if len(raw) <= MAX_TEXT_CONTENT:
+        return text
+    logger.warning(f"文件文本超长，截断至 {MAX_TEXT_CONTENT} 字节: {safe_filename}")
+    return raw[:MAX_TEXT_CONTENT].decode("utf-8", errors="ignore")
+
+
 async def handle_upload(file, username: str, role: str = "user") -> dict:
     """上传文件（支持 TXT/PDF/图片/Word 等），返回文件ID与提取的文本
 
     路由层仅参数解析后调用本函数；业务错误抛 HTTPException（由路由层转响应）。
     """
-    # 门禁必须在任何磁盘写入/解析之前：这里的成本是 20MB 落盘 + 线程池解析 + Redis 写
-    await _check_upload_gates(username, role)
     safe_filename = os.path.basename(file.filename or "")
     if not safe_filename:
         raise HTTPException(status_code=400, detail="文件名无效")
@@ -160,6 +173,13 @@ async def handle_upload(file, username: str, role: str = "user") -> dict:
         raise HTTPException(status_code=400, detail="文件缺少扩展名")
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"不支持的文件类型 '{ext}'")
+
+    # 门禁仍在任何磁盘写入/解析之前（成本口径：20MB 落盘 + 线程池解析 + Redis 写），
+    # 但挪到文件名/扩展名校验之后（2026-10-08 第四轮 D5 台账 485）：这几条是纯字符串
+    # 校验、零资源消耗，先计配额会让"打错文件名"也白吃 30 次/时的额度。
+    # 刻意不做 4xx 路径 DECR 归还——小时桶键被 DECR 成负值且丢 TTL，比白扣更糟；
+    # 超大文件仍在计之后拒（它确实占了 20MB 落盘），属真实消耗，不归还。
+    await _check_upload_gates(username, role)
 
     file_id = str(uuid.uuid4())
     save_path = os.path.join(UPLOAD_DIR, f"{file_id}{ext}")
@@ -183,10 +203,11 @@ async def handle_upload(file, username: str, role: str = "user") -> dict:
     except FileNotFoundError:  # noqa: silent-except 豁免：并发清理竞态为预期路径
         pass
 
-    # 限制存入 Redis 的文本大小（防恶意上传撑爆 Redis 内存，P0 #4）
-    if len(text_content) > MAX_TEXT_CONTENT:
-        logger.warning(f"文件文本超长，截断至 {MAX_TEXT_CONTENT} 字节: {safe_filename}")
-        text_content = text_content[:MAX_TEXT_CONTENT]
+    # 限制存入 Redis 的文本大小（防恶意上传撑爆 Redis 内存，P0 #4）。
+    # 2026-09-28 修正口径：按 UTF-8 **字节**算——原 `len(str)` 按字符，中文
+    # 3 字节/字，实际放行 60 万字节，防线虚标 3 倍。解析层已统一截到 4 万字
+    # （中文≈120KB 字节），正常路径够不着本保险丝；它只兜解析上限日后被调大的场景。
+    text_content = _clip_to_redis_bytes(text_content, safe_filename)
 
     # 存入 Redis（1小时过期）
     r = await get_redis()
@@ -203,8 +224,9 @@ async def handle_upload(file, username: str, role: str = "user") -> dict:
     await r.setex(f"file:{file_id}:content", 3600, text_content)
     await r.setex(f"file:{file_id}:meta", 3600, json.dumps(file_meta))
     # 反向索引（2026-09-12 修复配套：改绑手机号迁移 uploaded_by 时按用户枚举文件）
-    await r.sadd(f"file_owner:{username}", file_id)
-    await r.expire(f"file_owner:{username}", 3700)
+    # SADD 与 TTL 一次原子下发（2026-10-08 第四轮 D1）：分两条命令时，两步之间被杀
+    # 会留下无 TTL 的索引，file_id 早已过期而索引成员还挂着（迁移时读到空文件）
+    await sadd_touch_ttl(r, f"file_owner:{username}", file_id, 3700)
 
     logger.info(f"文件上传成功: user={username}, file={safe_filename}, "
                 f"type={ext}, size={size}, text_len={len(text_content)}, note={parse_note}")

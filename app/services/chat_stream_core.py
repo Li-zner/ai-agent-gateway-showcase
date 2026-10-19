@@ -7,19 +7,17 @@ chat_generate 严格按原版顺序：
   → except 降级 fallback_chain；finally cleanup_stream。
 """
 import asyncio
-import json
 import time
 from typing import AsyncIterator
 
 from ..models.schemas import ChatRequest
-from ..core.config import DEEPSEEK_MODEL
 from ..core.logging import setup_logging
 from ..core.persona_manager import is_civil_persona
 from ..core.semantic_cache import SemanticCache
 from ..core.stream_utils import sse
 from ..middleware.rate_limit import release_concurrent, renew_concurrent
 from .chat_stream_ctx import ChatStreamCtx, build_stream_ctx, finalize_answer
-from .chat_support import get_deepseek_key
+from .chat_support import get_deepseek_key, thinking_text, safety_message
 from .chat_fallback import fallback_chain
 from .chat_fast_paths import simple_fast_path, recommend_fast_path
 from .chat_react import react_loop
@@ -86,8 +84,9 @@ async def _finish_busy(ctx: ChatStreamCtx) -> AsyncIterator[str]:
 async def route_intent(ctx: ChatStreamCtx) -> None:
     """意图路由：先分类用户意图，只加载匹配工具；设置 ctx 的 agents/simple/recommend/tools"""
     from ..agents.router import classify_intent, get_tools_for_intent
+    from ..core.config import INTENT_USE_LLM
     try:
-        intent_result = await classify_intent(ctx.user_query, use_llm=False, username=ctx.username)
+        intent_result = await classify_intent(ctx.user_query, use_llm=INTENT_USE_LLM, username=ctx.username)
         if not is_civil_persona(ctx.persona_id):
             intent_result = await apply_travel_memory(ctx, intent_result)
         matched_agents = intent_result.get("agents", [])
@@ -109,7 +108,7 @@ async def route_intent(ctx: ChatStreamCtx) -> None:
                 ctx.travel_waiting_slot = True
                 ctx.travel_pending_clear = False
             else:
-                ctx.user_query = build_travel_query(state)
+                ctx.user_query = build_travel_query(state, getattr(ctx.req, "lang", "zh"))
         if matched_agents:
             tools = get_tools_for_intent(matched_agents)
         else:
@@ -145,7 +144,9 @@ async def civil_route_gate(ctx: ChatStreamCtx) -> AsyncIterator[str]:
             mark_route("civil_reject")
             yield sse("answer_complete", _route.message) + "data: [DONE]\n\n"
             # 拒答也要收尾入历史：与 law_mapping_gate 同一标准，问答不丢上下文
-            await finalize_answer(ctx, _route.message)
+            # write_cache=False：拒答是硬规则文案不是 LLM 成果，钉进 60 天缓存会让路由表
+            # 修订在 TTL 内不生效（同问继续拿到旧拒答）
+            await finalize_answer(ctx, _route.message, write_cache=False)
             ctx.saved_normally = True
             ctx.finished = True
             return
@@ -181,7 +182,7 @@ async def serve_from_cache(ctx: ChatStreamCtx) -> AsyncIterator[str]:
             sf = get_filter()
             if sf.contains_sensitive(cached_response):
                 logger.warning("DFA 拦截语义缓存")
-                cached_response = sf.safe_message
+                cached_response = safety_message(ctx.req, sf.safe_message)
             logger.info("语义缓存命中")
             mark_route("cache_hit")
             yield sse("answer_chunk", cached_response)
@@ -235,7 +236,7 @@ async def rebuild_lock_gate(ctx: ChatStreamCtx) -> AsyncIterator[str]:
             _sf = get_filter()
             if _sf.contains_sensitive(_cached_retry):
                 logger.warning("DFA 拦截语义缓存（重读路径）")
-                _cached_retry = _sf.safe_message
+                _cached_retry = safety_message(ctx.req, _sf.safe_message)
             mark_route("cache_hit")
             yield sse("answer_chunk", _cached_retry)
             yield sse("answer_complete", _cached_retry) + "data: [DONE]\n\n"
@@ -277,7 +278,9 @@ async def law_mapping_gate(ctx: ChatStreamCtx) -> AsyncIterator[str]:
             logger.info(f"法律映射表命中 #{_law_match['id']}: {_law_match['scenario']} → {_law_match['law']}")
             mark_route("law_mapping")
             yield sse("answer_complete", _law_match['message']) + "data: [DONE]\n\n"
-            await finalize_answer(ctx, _law_match['message'])
+            # write_cache=False：映射表文案是规则成果不是 LLM 成果，钉进缓存会让
+            # law_mapping 表修订在 TTL 内不生效（同问继续拿到旧引导语）
+            await finalize_answer(ctx, _law_match['message'], write_cache=False)
             ctx.saved_normally = True
             ctx.finished = True
             logger.info("法律映射表已拦截，返回引导信息")
@@ -302,7 +305,8 @@ async def cleanup_stream(ctx: ChatStreamCtx) -> None:
         except asyncio.CancelledError:  # noqa: silent-except 豁免：任务取消是预期收尾
             pass
     await release_concurrent(ctx.username, ctx.concurrent_lease)
-    if not ctx.saved_normally and ctx.mm and ctx.partial_answer and ctx.partial_answer != "抱歉，我暂时无法回答。":
+    from ..core.config import EMPTY_ANSWER_VARIANTS
+    if not ctx.saved_normally and ctx.mm and ctx.partial_answer and ctx.partial_answer not in EMPTY_ANSWER_VARIANTS:
         try:
             await ctx.mm.save_messages(
                 {"role": "user", "content": ctx.req.query},
@@ -391,7 +395,7 @@ async def _run_chat_pipeline(ctx: ChatStreamCtx) -> AsyncIterator[str]:
 
 
 async def _fallback_events(ctx: ChatStreamCtx | None,
-                           error: Exception) -> AsyncIterator[str]:
+                           error: Exception, lang: str = "zh") -> AsyncIterator[str]:
     """异常降级；已送达答案时不重复输出。降级输出聚合后统一 finalize。"""
     if ctx is not None and ctx.saved_normally:
         logger.warning(f"V2 收尾阶段异常（主回答已送达，跳过降级）: {error}")
@@ -413,7 +417,7 @@ async def _fallback_events(ctx: ChatStreamCtx | None,
     if ctx is None:
         # ctx 构建失败（如 Redis/PG 抖动）：没有 req 可喂降级链，
         # 直接给兜底文案，不再让降级链自身 AttributeError 变 500
-        yield sse("answer_complete", "服务暂时不可用，请稍后再试。") + "data: [DONE]\n\n"
+        yield sse("answer_complete", thinking_text("service_unavailable", lang)) + "data: [DONE]\n\n"
         return
     from .chat_fallback import accumulate_sse_text
     _fb_text = ""
@@ -423,7 +427,7 @@ async def _fallback_events(ctx: ChatStreamCtx | None,
             _fb_text = accumulate_sse_text(_fb_text, chunk)
     except Exception as fb_err:
         logger.error(f"降级也失败: {fb_err}")
-        _fb_text = _fb_text or '服务暂时不可用，请稍后再试。'
+        _fb_text = _fb_text or thinking_text("service_unavailable", lang)
         yield sse("answer_complete", _fb_text) + "data: [DONE]\n\n"
     # 2026-09-14 审计 P1：顶层异常降级此前只转发 SSE 未 finalize——用户拿到
     # 答案但 trace 记失败、历史与日请求计数缺失。write_cache=False：降级答案
@@ -437,7 +441,7 @@ async def _fallback_events(ctx: ChatStreamCtx | None,
             await _refund_trial_if_unproduced(ctx.username)
         try:
             await finalize_answer(
-                ctx, _fb_text or '服务暂时不可用，请稍后再试。', write_cache=False)
+                ctx, _fb_text or thinking_text("service_unavailable", lang), write_cache=False)
         except Exception as fin_err:
             logger.warning(f"降级收尾失败（内容已送达，不影响用户）: {fin_err}")
 
@@ -464,7 +468,7 @@ async def _chat_generate_impl(req: ChatRequest, current_user: dict,
         async for ev in _run_chat_pipeline(ctx):
             yield ev
     except Exception as e:
-        async for ev in _fallback_events(ctx, e):
+        async for ev in _fallback_events(ctx, e, getattr(req, "lang", "zh")):
             yield ev
     finally:
         await _cleanup_generation(ctx, current_user)

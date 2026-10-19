@@ -7,19 +7,25 @@ MVP（2026-09-13）：
   （"现在检索健康吗""哪类异常最多""该不该介入"）——监测数据的自然语言窗口
 """
 import uuid
-from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..core.audit import ACT_ADMIN, ACT_RAG_ASK, ACT_RAG_CONTENT_VIEW, audit
+from ..core.audit import ACT_ADMIN, ACT_RAG_CONTENT_VIEW, audit
 from ..middleware.auth import get_current_user, require_admin
 from ..services.rag_request_content import (
     fetch_request_content,
     request_content_payload,
 )
 from .rag_admin_actions import actions_router
+from .rag_admin_ask import (  # ask 端点已拆出；非 router 项为兼容旧导入路径的再导出
+    _ASK_SYSTEM,
+    _ask_user_content,
+    RagAskBody,
+    RagAskMessage,
+    ask_router,
+    rag_ask,
+)
 from .rag_admin_changesets import changeset_router
 from .rag_admin_data import data_router
 from .rag_admin_eval import eval_router
@@ -29,6 +35,7 @@ from .rag_admin_status import (
     _fetch_requests,
     _fetch_status,
     _load_latest_evaluation,
+    effective_config,
 )
 
 # 路由级门禁（2026-09-19 审查 F-P2-2）：整个 /api/admin/rag 分区默认要求 admin，
@@ -51,6 +58,12 @@ async def rag_status(
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"监测数据不可用: {type(e).__name__}")
 
+@rag_admin_router.get("/effective-config")
+async def rag_effective_config(current_user: dict = Depends(get_current_user)):
+    """当前生效配置 + 来源（默认/env/运行期覆盖）——口径漂移的在线唯一真相（2026-09-30）"""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可访问")
+    return await effective_config()
 
 @rag_admin_router.get("/requests")
 async def rag_requests(
@@ -353,7 +366,7 @@ async def rag_cancel_action(
 async def rag_rollback_action(
         action_id: int,
         current_user: dict = Depends(get_current_user)):
-    """人工回滚已成功且支持回滚的动作。"""
+    """人工回滚已成功或已失败、且支持回滚的动作（failed 带真快照时可重试回滚）。"""
     if current_user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可访问")
     from ..core.db import get_pool
@@ -366,6 +379,37 @@ async def rag_rollback_action(
         raise HTTPException(status_code=409, detail="动作当前不允许回滚")
     await _audit_admin(current_user, "rag_action_rollback",
                        action_id=action_id, status=item["status"])
+    return item
+
+
+class RagActionCheckBody(BaseModel):
+    """人工核对终结的说明；长度与 reason 同档。"""
+
+    note: str = Field(..., min_length=1, max_length=500)
+
+
+@rag_admin_router.post("/actions/{action_id}/check")
+async def rag_check_action(
+        action_id: int,
+        body: RagActionCheckBody,
+        current_user: dict = Depends(get_current_user)):
+    """人工核对后终结执行失败的动作（只翻状态与留痕，不改动任何业务数据）。"""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可访问")
+    note = body.note.strip()
+    if not note:
+        raise HTTPException(status_code=400,
+                            detail="请填写核对说明：终结等于由人来担保数据状态")
+    from ..core.db import get_pool
+    from ..services.rag_actions import check_action
+    pool = await get_pool()
+    async with pool.acquire(timeout=5) as conn:
+        item = await check_action(
+            conn, action_id, current_user.get("username", ""), note)
+    if item is None:
+        raise HTTPException(status_code=409, detail="仅执行失败的动作可标记为已核对")
+    await _audit_admin(current_user, "rag_action_check",
+                       action_id=action_id, status=item["status"], note=note)
     return item
 
 
@@ -396,6 +440,13 @@ rag_admin_router.include_router(data_router)
 
 # 业务写动作提议（P2）：不挂事件的独立入口，只创建待审批动作，执行仍走 worker。
 rag_admin_router.include_router(actions_router)
+
+# 运维问答（/ask 与 /ask/stream）已拆至 rag_admin_ask.py（600 行门禁）；子路由不带
+# prefix，前缀由本 router 提供，同样继承上面的路由级 require_admin。
+rag_admin_router.include_router(ask_router)
+
+# DB Agent 已于 2026-10-03 拆出独立挂载（main.py，前缀不变）：按能力授权
+# （capabilities.py）而非整体 admin——子账号由 permissions 允许清单开通。
 
 
 @rag_admin_router.get("/daily-report")
@@ -428,166 +479,9 @@ async def rag_daily_report(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail=f"报告不可用: {type(e).__name__}")
 
 
-class RagAskMessage(BaseModel):
-    """运维会话历史消息，限制长度和角色集合。"""
-
-    role: Literal["user", "assistant"]
-    content: str = Field(..., min_length=1, max_length=4000)
-
-
-class RagAskBody(BaseModel):
-    question: str
-    history: list[RagAskMessage] = Field(default_factory=list, max_length=10)
-
-
 class RagActionPlanBody(BaseModel):
     """动作提案参数；仅允许白名单 action_key。"""
 
     action_key: str = Field(..., min_length=1, max_length=64)
     params: dict = Field(default_factory=dict)
     reason: str = Field(default="", max_length=500)
-
-
-# 格式契约（2026-09-18）：不约束输出时模型自由发挥 markdown 标题/表格，前端
-# renderMarkdown 渲染忽大忽小；且运维会话带 history，模型会模仿旧回复的凌乱
-# 排版——system 提示词会被历史压过，故契约同时钉进每条用户消息末尾（近因位置）
-_ASK_FORMAT = (
-    "输出格式：正文依次用【异常结论】【定位与根因】【建议动作】三段，"
-    "段内用 - 短句列表、每条不超过 60 字，引用指标必须带字段名和数值；"
-    "不使用 markdown 标题、加粗、表格、代码块和 emoji。"
-)
-
-_ASK_SYSTEM = (
-    "你是 RAG 检索系统的运维助手。下面是系统实时监测数据（JSON）。"
-    "基于数据回答管理员的问题：指出异常、定位环节（召回/融合/重排/回答依据）、"
-    "给出是否需要人工介入的判断与具体动作建议。数据里没有的信息不要编造。"
-    "所有回答必须使用简体中文；request_uid、chunk_key 等技术标识符保留原样。"
-    + _ASK_FORMAT +
-    "简单追问可只答所问，不强行凑三段。"
-)
-
-
-def _ask_user_content(context: str, question: str) -> str:
-    """/ask 与 /ask/stream 共用的用户消息：末尾重申格式，压过历史消息的排版影响"""
-    return (f"监测数据：\n{context}\n\n管理员提问：{question}\n\n"
-            f"{_ASK_FORMAT}请按上述格式回答，不要模仿历史消息的排版。")
-
-
-@rag_admin_router.post("/ask")
-async def rag_ask(body: RagAskBody, current_user: dict = Depends(get_current_user)):
-    """向 LLM 提问 RAG 运行状况（自动注入实时监测摘要）"""
-    if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可访问")
-    question = (body.question or "").strip()[:500]
-    if not question:
-        raise HTTPException(status_code=422, detail="question 不能为空")
-    await audit(
-        current_user["username"],
-        ACT_RAG_ASK,
-        {"question_length": len(question)},
-    )
-    try:
-        status = await _fetch_status()
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"监测数据不可用: {type(e).__name__}")
-
-    # 结构化瘦身（公共实现见 rag_monitor._slim_status）：字符硬截会把 JSON
-    # 截成非法片段；明细限 10 条 + evidence 截短 + 丢 patch 全文
-    import json as _json
-    from ..services.rag_monitor import _slim_status
-    context = _json.dumps(_slim_status(status), ensure_ascii=False)
-    try:
-        from ..services.chat_support import post_chat_completion
-        from ..core.config import HTTP_TIMEOUT_MEDIUM
-        history_messages = [
-            {"role": item.role, "content": item.content}
-            for item in body.history
-        ]
-        # max_tokens=2000 + MEDIUM 超时：flash 模型先输出 reasoning_content，
-        # SHORT(5s) 下完整监测摘要的推理跑不完（冒烟实测 502），预算与超时都留足
-        ok, data = await post_chat_completion(
-            {"model": None,
-             "messages": [
-                 {"role": "system", "content": _ASK_SYSTEM},
-                 *history_messages,
-                 {"role": "user", "content": _ask_user_content(context, question)}],
-             "temperature": 0.2, "max_tokens": 2000},
-            timeout=HTTP_TIMEOUT_MEDIUM)
-        if not ok:
-            raise HTTPException(status_code=502, detail="上游 LLM 不可用")
-        answer = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-        if not answer.strip():
-            raise HTTPException(status_code=502, detail="LLM 返回空内容，请重试或缩小问题范围")
-        return {"answer": answer, "status_snapshot": status}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"问询失败: {type(e).__name__}")
-
-
-@rag_admin_router.post("/ask/stream")
-async def rag_ask_stream(body: RagAskBody,
-                         current_user: dict = Depends(get_current_user)):
-    """运维会话流式版（P2-1）：SSE 逐段输出，协议对齐主聊天
-    （answer_chunk/answer_complete/[DONE]，thought 透传但不承载业务语义）。
-
-    上下文构造与审计口径与 /ask 完全一致；/ask 保留作为非流式兼容入口。
-    与 /ask 的已知差异：不做 flash 模型降级——主模型失败以 answer_error
-    事件送达，由操作者重试。
-    """
-    if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可访问")
-    question = (body.question or "").strip()[:500]
-    if not question:
-        raise HTTPException(status_code=422, detail="question 不能为空")
-    await audit(
-        current_user["username"],
-        ACT_RAG_ASK,
-        {"question_length": len(question)},
-    )
-    try:
-        status = await _fetch_status()
-    except Exception as e:
-        raise HTTPException(status_code=503,
-                            detail=f"监测数据不可用: {type(e).__name__}")
-
-    import json as _json
-    from ..services.rag_monitor import _slim_status
-    context = _json.dumps(_slim_status(status), ensure_ascii=False)
-    history_messages = [{"role": item.role, "content": item.content}
-                        for item in body.history]
-    messages = [
-        {"role": "system", "content": _ASK_SYSTEM},
-        *history_messages,
-        {"role": "user", "content": _ask_user_content(context, question)},
-    ]
-
-    async def _events():
-        from ..core.config import DEEPSEEK_MODEL
-        from ..core.stream_utils import sse, stream_llm
-        from ..services.chat_support import get_deepseek_key
-        collected = []
-        try:
-            # stream_llm 不对空 key 兜底（llm_endpoint 原样透传），
-            # 必须走带健康度轮询的 key 池，与主聊天流同源。
-            api_key = await get_deepseek_key()
-            async for event in stream_llm(
-                    api_key, DEEPSEEK_MODEL, messages,
-                    temperature=0.2, max_tokens=2000,
-                    username=current_user.get("username", "")):
-                if event.get("type") == "reasoning":
-                    yield sse("thought", event.get("text") or "")
-                elif event.get("type") == "content":
-                    text = event.get("text") or ""
-                    collected.append(text)
-                    yield sse("answer_chunk", text)
-            answer = "".join(collected).strip()
-            if not answer:
-                yield sse("answer_error", "LLM 返回空内容，请重试或缩小问题范围")
-            else:
-                yield sse("answer_complete", answer)
-        except Exception as e:
-            yield sse("answer_error", f"问询失败: {type(e).__name__}")
-        yield "data: [DONE]\n\n"
-
-    return StreamingResponse(_events(), media_type="text/event-stream")

@@ -28,8 +28,11 @@ def _get_trace_id():
             span_context = current_span.get_span_context()
             if span_context and span_context.is_valid:
                 return format(span_context.trace_id, '032x')
-    except Exception as e:
-        logging.getLogger(__name__).debug(f"OTel trace_id 读取失败: {e}")
+    except Exception:
+        # 这里绝不能打日志：本函数被 JsonFormatter.format() 调用，
+        # 再发一条记录会再次进同一个 format()，缺 opentelemetry 时直接自递归到
+        # RecursionError（Bug日志 65）。取不到 trace_id 就当没有。
+        return None
     return None
 
 

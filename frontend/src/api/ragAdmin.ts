@@ -311,6 +311,10 @@ export function rollbackRagAction(actionId: number): Promise<RagAction> {
   return post(`/api/admin/rag/actions/${actionId}/rollback`)
 }
 
+export function checkRagAction(actionId: number, note: string): Promise<RagAction> {
+  return post(`/api/admin/rag/actions/${actionId}/check`, { note })
+}
+
 export function runRagActionWorker(): Promise<{ executed: number }> {
   return post('/api/admin/rag/actions/run-once')
 }

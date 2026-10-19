@@ -29,7 +29,9 @@ _REPORTS_DIR = (
 # 评测流量来源标记（与 retrieval_traces 回填口径一致，见
 # tests/eval_traces_to_monitor.py）：这类行不是真实用户请求，默认从运营
 # 统计里排除，UI「含评测流量」开关置真时再计入。
-EVAL_PERSONA = "civil_code_eval"
+# 批1 B-P1-3：值改从 core.persona_manager 取——同一人格 id 现在有两处消费者
+# （统计排除 + 画像写入口排除），散抄两份会漂移出"统计排掉了、画像还在收"。
+from ..core.persona_manager import EVAL_PERSONA_ID as EVAL_PERSONA
 
 
 def _eval_filter(idx: int) -> tuple[str, list]:
@@ -135,6 +137,54 @@ async def _fetch_runtime_config(conn) -> dict:
         "rerank_top_default": default_top,
         "rerank_top_overridden": override is not None,
     }
+
+
+async def effective_config() -> dict:
+    """当前生效配置 + 来源链（默认 → env → 运行期覆盖）——口径漂移的在线唯一真相。
+
+    2026-09-30 口径治理：重排窗 15/12、摘要阈值 15/30/20 这类"一个数字两个家"
+    的问题以本端点为准，文档只链接不抄数。只读；Redis 不可达时运行期覆盖
+    标注 unavailable 并回落 env/默认（不因 Redis 故障 500）。
+    """
+    import os
+
+    from ..core.config import _settings
+    from ..core.db import _POOL_CONFIG
+
+    def _kv(env_name: str, value, default) -> dict:
+        source = "env" if os.getenv(env_name) is not None else "default"
+        return {"value": value, "source": source, "default": default, "env": env_name}
+
+    items = {
+        "KB_RERANK_TOP": _kv("KB_RERANK_TOP", int(os.getenv("KB_RERANK_TOP", "15")), 15),
+        "SUMMARY_THRESHOLD": _kv("SUMMARY_THRESHOLD", _settings.summary_threshold, 30),
+        "HISTORY_LIMIT": _kv("HISTORY_LIMIT", _settings.history_limit, 30),
+        "DB_POOL_MIN_SIZE": _kv("DB_POOL_MIN_SIZE", _POOL_CONFIG["min_size"], 2),
+        "DB_POOL_MAX_SIZE": _kv("DB_POOL_MAX_SIZE", _POOL_CONFIG["max_size"], 10),
+        "DB_ACQUIRE_TIMEOUT": _kv("DB_ACQUIRE_TIMEOUT", _settings.db_acquire_timeout, 10.0),
+        "DB_COMMAND_TIMEOUT": _kv("DB_COMMAND_TIMEOUT", _settings.db_command_timeout, 30.0),
+        "USER_CONCURRENT": _kv("USER_CONCURRENT", _settings.user_concurrent, 200),
+        "ADMIN_CONCURRENT": _kv("ADMIN_CONCURRENT", _settings.admin_concurrent, 500),
+        "INTENT_USE_LLM": _kv("INTENT_USE_LLM", _settings.intent_use_llm, False),
+        "ORCH_ENABLE_PHASE2": _kv("ORCH_ENABLE_PHASE2", _settings.orch_enable_phase2, False),
+        "EMBEDDING_TIMEOUT": _kv("EMBEDDING_TIMEOUT", _settings.embedding_timeout, 10.0),
+    }
+
+    # 重排窗是唯一带 Redis 运行期覆盖通道的键：检索路径真实消费 get_rerank_top()
+    try:
+        from ..core.redis import get_redis
+        from ..services.rag_runtime_config import (RERANK_TOP_KEY, RERANK_TOP_MAX,
+                                                   RERANK_TOP_MIN, get_rerank_top)
+        raw = await (await get_redis()).get(RERANK_TOP_KEY)
+        if raw is not None and RERANK_TOP_MIN <= int(raw) <= RERANK_TOP_MAX:
+            items["KB_RERANK_TOP"].update(value=await get_rerank_top(
+                items["KB_RERANK_TOP"]["value"]),
+                source="runtime(redis)", runtime_value=int(raw))
+        else:
+            items["KB_RERANK_TOP"]["runtime_value"] = None
+    except Exception:
+        items["KB_RERANK_TOP"]["runtime_value"] = "unavailable"
+    return {"items": items}
 
 
 async def _fetch_health_meta(conn) -> dict:

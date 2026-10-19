@@ -44,7 +44,7 @@ llm_tokens_total = Counter(
 llm_tokens_detail = Counter(
     'llm_tokens_detail',
     'LLM tokens by model and endpoint',
-    ['model', 'endpoint', 'type']  # model=DEEPSEEK_MODEL, endpoint=v2_chat/sub_agent, type=input/output
+    ['model', 'endpoint', 'type']  # model=LLM_PRIMARY_MODEL, endpoint=v2_chat/sub_agent, type=input/output
 )
 
 llm_requests_total = Counter(
@@ -275,4 +275,11 @@ dbagent_nightly_eval_last_total = Gauge(
 dbagent_nightly_eval_last_run_timestamp_seconds = Gauge(
     'dbagent_nightly_eval_last_run_timestamp_seconds',
     '黄金评测夜跑最近完成时间戳'
+)
+
+# 告警出网（#7）：webhook 推送结果
+alerting_sent_total = Counter(
+    'alerting_sent_total',
+    '告警 webhook 推送结果',
+    ['result']  # sent / failed
 )

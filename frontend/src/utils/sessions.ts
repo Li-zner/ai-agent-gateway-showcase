@@ -8,6 +8,8 @@ export interface ChatSession {
   title: string
   /** auto=随画像刷新摘要标题；manual=用户手动重命名后保持。 */
   titleMode?: 'auto' | 'manual'
+  /** 自动标题已在首轮确定并冻结，后续消息不再改名（手动重命名不受此限）。 */
+  titleLocked?: boolean
   conversationId: string
   messages: ChatMessage[]
   updatedAt: number

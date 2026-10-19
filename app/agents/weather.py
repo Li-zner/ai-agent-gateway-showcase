@@ -7,20 +7,16 @@ tools.py 保留 re-export，外部 import 路径不变。
 import httpx
 
 from ..core.logging import setup_logging
-from ..core.config import HTTP_TIMEOUT_SHORT
+from ..core.config import MAP_API_TIMEOUT
 
 logger = setup_logging()
 
 
 def _geocode_contains(candidate: str, geocode: dict) -> bool:
-    """geocode 包含性守卫：高德对垃圾输入也会模糊匹配（线上实测"我需要具体"
-    被匹配到枣庄薛城区），要求候选词出现在匹配结果的 city/district/省/地址串
-    里才认账，否则视为未找到。纯函数，独立单测。"""
-    if not candidate:
-        return False
-    matched = "".join(str(geocode.get(k) or "") for k in
-                      ("city", "district", "province", "formatted_address"))
-    return candidate in matched
+    """geocode 包含性守卫：已下沉 core.place_extract.geocode_contains 共享
+    （2026-09-29 路线规划接入同款，防两处定义漂移），此处保留薄转发。"""
+    from ..core.place_extract import geocode_contains
+    return geocode_contains(candidate, geocode)
 
 
 def _normalize_forecast(forecasts: list) -> list:
@@ -53,7 +49,9 @@ async def fetch_weather_async(city: str, depth: int = 0):
     if not amap_key:
         return {"error": "缺少高德 API Key"}
     try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SHORT) as client:
+        # 2026-09-30 校准收敛（B3）：同服务（restapi.amap.com）与 map_api 其余
+        # 五处统一用 MAP_API_TIMEOUT，原先这里用 SHORT(5s) 各改各的
+        async with httpx.AsyncClient(timeout=MAP_API_TIMEOUT) as client:
             # 1. 查城市编码
             geo_resp = await client.get(
                 "https://restapi.amap.com/v3/geocode/geo",

@@ -4,7 +4,6 @@ import { get, post } from './http'
 export interface Wallet {
   user_id: string
   balance: number
-  frozen_amount: number
   total_recharged: number
   total_spent: number
   total_refunded: number

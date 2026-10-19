@@ -10,6 +10,7 @@
 """
 import json
 import re
+import uuid
 
 import httpx
 
@@ -26,6 +27,7 @@ from ..core.place_extract import auto_tool_args, default_city, extract_weather_c
 from ..core.concurrency import llm_semaphore
 from ..core.jfast import loads as jloads
 from .persona_manager import is_civil_persona
+from .safety_filter import strip_control_tokens
 from ..core.redis import get_redis
 from ..middleware.circuit_breaker import get_breaker
 
@@ -35,25 +37,38 @@ def sse(event: str, content) -> str:
 
     ensure_ascii=True 与原实现（v2.py 手写 json.dumps）行为一致——中文转义为
     \\uXXXX（前端已验证的传输路径）；不要改为 False。
+
+    answer_complete 是唯一携带回答全文的收口点（前端以其覆盖流式增量为准），
+    在传输层剥一次模型控制标记即覆盖简单/推荐/ReAct/降级全部路径，
+    无需逐调用点改；reasoning 已在 ReasoningStreamGuard 内处理，此处只兜回答。
     """
+    if event == "answer_complete" and isinstance(content, str):
+        content = strip_control_tokens(content)
     return f"data: {json.dumps({'type': event, 'content': content})}\n\n"
 
 
+# bill_uid（P1-1 扣费幂等键，2026-09-28）：**每次上游 LLM 调用一个**，不是整轮 request
+# ——ReAct 多步与模型降级重试是分别真实发生的费用，按轮去重会把第 2 步之后全判成重复
+# → 漏扣。由调用方生成并传入（断连排空/估算兜底要沿用同一个键，它们看不到 usage 事件）；
+# 留空则本函数自备一个，同一次调用的多个 usage 块共用它，因此上游重复携带 usage
+# （百炼/兼容网关的已知怪癖，本函数按块判定、无 break）也会被幂等拦掉。
+# 键的写入与 fail-open 口径见 services/llm_streaming._claim_bill。
 async def stream_llm(api_key: str, model: str, messages: list, *,
                      tools: list | None = None, tool_choice: str = "auto",
                      temperature: float | None = LLM_TEMPERATURE, max_tokens: int | None = 2048,
-                     username: str | None = None):
+                     username: str | None = None, bill_uid: str = ""):
     """DeepSeek 流式调用生成器 — yield 统一事件 dict（调用方决定消费方式）
 
     事件类型：
       {"type": "reasoning", "text": str}       思考内容增量
       {"type": "content",   "text": str}       回答内容增量
       {"type": "tool_calls", "delta": list}    工具调用流式片段（需调用方累积）
-      {"type": "usage", "prompt_tokens": int, "completion_tokens": int}  用量（出现一次）
+      {"type": "usage", "prompt_tokens": int, "completion_tokens": int, "bill_uid": str}
 
     temperature/max_tokens 传 None 时不加入请求体（保持模型默认，用于 ReAct 循环路径）。
     上游失败抛异常，由调用方决定降级策略（不在此吞异常）。
     """
+    _bill_uid = bill_uid or uuid.uuid4().hex
     payload = {
         "model": model,
         "messages": messages,
@@ -109,7 +124,7 @@ async def stream_llm(api_key: str, model: str, messages: list, *,
                             delta = {}
                         if data.get("usage"):  # 百炼流式中间块会带 usage:null，仅真对象时计量
                             u = data["usage"]
-                            yield {"type": "usage",
+                            yield {"type": "usage", "bill_uid": _bill_uid,
                                    "prompt_tokens": u.get("prompt_tokens") or 0,
                                    "completion_tokens": u.get("completion_tokens") or 0}
                         if delta.get("reasoning_content"):
@@ -120,9 +135,14 @@ async def stream_llm(api_key: str, model: str, messages: list, *,
                             yield {"type": "tool_calls", "delta": delta["tool_calls"]}
 
 
-# 消毒侧的处理上限。注意与进模型的量不同：调用点 build_file_context 还会对消毒
-# 结果再切 `[:8000]` 才拼进 prompt，所以这里大于 8000 的部分只影响耗时不影响输出。
-_UPLOAD_MAX_CHARS = 50000
+# 上传文本进模型的**全链路唯一上限**（2026-09-28 主人拍板 40000）：消毒输入、
+# build_file_context 拼 prompt 的切片、document_parser 的解析输出截断、
+# file_upload 的 txt 直读截断全部引用这一个数（经 UPLOAD_TEXT_MAX_CHARS）。
+# 旧口径四个数并存（解析 15 万 / txt 直读 5 万 / 消毒 5 万 / prompt 切片 8 千），
+# 超出消费口径的部分零读取方，白耗 OCR 全局锁与 Redis。
+# Redis 侧存储防线另有 MAX_TEXT_CONTENT（file_upload.py，字节面保险丝），不归这里管。
+UPLOAD_TEXT_MAX_CHARS = 40000
+_UPLOAD_MAX_CHARS = UPLOAD_TEXT_MAX_CHARS  # 既有内部引用与测试的别名，勿另赋值
 # 注入话术模式：锚点与目标词之间用 `[^\n]{0,60}?`（不跨行、最多 60 字）而不是
 # `.*?`。真实注入都在同一行内几十字（"忽略以上的所有指令"），60 字足够；而 `.*?`
 # 未定界会让**每个锚点**把剩余文本扫一遍，耗时 = 锚点密度 × 剩余长度（见下方函数注释）。
@@ -131,9 +151,15 @@ _UPLOAD_MAX_CHARS = 50000
 # 不是信任边界，边界在"文件内容只注入给上传者本人"（见 build_file_context）。
 _INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE) for p in (
-        r"忽略(之前|以上|前面)[^\n]{0,60}?指令",
+        # 2026-09-28 扩锚（P2 登记的三个漏网样例：忽略上面的所有指令 / 忽略以下的
+        # 指令 / 忽略 以上 的 指 令）：锚词表补 上面/以下/下面/上述/前方，允许
+        # 字间空白（忽\s*略、指\s*令），目标词泛化到 指示/要求/命令/提示/设定
+        r"忽\s*略[^\n]{0,40}?(?:之\s*前|以\s*上|上\s*面|以\s*下|下\s*面|前\s*面|上\s*述|前\s*方)[^\n]{0,40}?(?:指\s*令|指\s*示|要\s*求|命\s*令|提\s*示|设\s*定)",
         r"忽略[^\n]{0,60}?system\s*(?:prompt|message|instruction)",
-        r"ignore\s+(?:all\s+)?(?:previous|above|prior)\s+instructions",
+        # 英文 ignore 锚补 following/below（"ignore the following instructions"
+        # 这类向后注入原先漏网），动词加 disregard，目标词加 prompts/rules/directives
+        r"(?:ignore|disregard)\s+(?:all\s+|the\s+)?(?:previous|above|prior|preceding|earlier)\s+(?:instructions?|prompts?|rules?|directives?)",
+        r"(?:ignore|disregard)\s+(?:all\s+|the\s+)?(?:following|below|subsequent)\s+(?:instructions?|prompts?|rules?|directives?)",
         r"你(?:现在|已经)[^\n]{0,60}?是[^\n]{0,60}?(?:系统|管理员|root)",
         r"你现在[^\n]{0,60}?扮演",
         r"返回[^\n]{0,60}?(?:密码|密钥|token|secret|key)",
@@ -217,11 +243,16 @@ async def build_file_context(req, username: str = "") -> str | None:
     # 数量上限（2026-09-07 审查 P2）：每个 id 2 次 Redis GET，恶意超长列表可放大
     # Redis 往返；与 models/schemas 的 file_ids 约束同值，schema 是源头、此处兜底
     MAX_FILE_IDS = 5
+    # 多文件合计预算（2026-09-28）：5 文件 × 4 万 = 20 万字单请求进 prompt 是
+    # token 费用与延迟尖峰；合计 6 万封顶，按文件顺序消费，超出截断/跳过并标注
+    FILE_CONTEXT_TOTAL_CHARS = 60000
     file_ids = list(getattr(req, "file_ids", None) or [])[:MAX_FILE_IDS]
     if not file_ids:
         return None
     r = await get_redis()
     file_parts = []
+    remaining = FILE_CONTEXT_TOTAL_CHARS
+    skipped_by_budget = 0
     for fid in file_ids:
         content = await r.get(f"file:{fid}:content")
         meta_raw = await r.get(f"file:{fid}:meta")
@@ -238,11 +269,23 @@ async def build_file_context(req, username: str = "") -> str | None:
         # username 缺失时整体跳过注入——信任边界默认值不得放行
         if not username or meta.get("uploaded_by") != username:
             continue
+        if remaining <= 0:
+            skipped_by_budget += 1
+            continue
         safe = sanitize_uploaded_content(content.decode() if isinstance(content, bytes) else content)
         fname = meta.get("filename", "未知文件")
         ftype = meta.get("parse_note", "文档")
         flen = meta.get("text_length", len(safe))
-        file_parts.append(f"【{fname}】({ftype}, {flen}字)\n```\n{safe[:8000]}\n```")
+        take = min(len(safe), _UPLOAD_MAX_CHARS, remaining)
+        part = safe[:take]
+        if len(safe) > len(part):
+            part += "\n[文件内容超出剩余注入预算，已截断]"
+        remaining -= len(part)
+        file_parts.append(
+            f"【{fname}】({ftype}, {flen}字)\n```\n{part}\n```")
+    if skipped_by_budget:
+        file_parts.append(f"[另有 {skipped_by_budget} 个文件未注入：已达"
+                          f"{FILE_CONTEXT_TOTAL_CHARS} 字的文件内容总量上限]")
     if not file_parts:
         return None
     return (

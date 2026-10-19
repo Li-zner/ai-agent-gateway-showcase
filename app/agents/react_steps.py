@@ -11,13 +11,14 @@ runner.run_agent_task 只做编排（缓存/锁/路由/收尾），本模块负�
 
 import asyncio
 import json
+import uuid
 import httpx
 
 from ..core.logging import setup_logging
 from ..core.persona_manager import is_civil_persona
 from ..core.config import (
-    TOOL_TIMEOUT, DEEPSEEK_API_BASE, DEEPSEEK_MODEL,
-    DEEPSEEK_FLASH_MODEL, HTTP_TIMEOUT_LONG,
+    TOOL_TIMEOUT, DEEPSEEK_API_BASE, LLM_PRIMARY_MODEL,
+    LLM_FALLBACK_MODEL, HTTP_TIMEOUT_LONG,
 )
 from ..core.safety_filter import (
     ContentStreamGuard, sanitize_error_text, sanitize_untrusted_text,
@@ -57,6 +58,7 @@ async def _consume_llm_stream(task_id: str, api_key: str, messages: list, tools:
     done=True 表示任务已因取消而终结，调用方直接返回。
     """
     _content_guard = ContentStreamGuard(sf)
+    from ..services.chat_support import attach_bill_uid, safety_message
     state = {
         "content": "", "has_tool_calls": False,
         "tool_calls_index": {},
@@ -64,21 +66,24 @@ async def _consume_llm_stream(task_id: str, api_key: str, messages: list, tools:
         "blocked": False,
     }
     # 统一走 stream_llm（ReAct 路径保持模型默认 temperature）
-    _agen = stream_llm(api_key, DEEPSEEK_MODEL, messages, tools=tools,
+    _agen = stream_llm(api_key, LLM_PRIMARY_MODEL, messages, tools=tools,
                        tool_choice="auto", temperature=None, max_tokens=None)
     _stream_blocked = False
     async for _ev in _agen:
         if _ev["type"] == "usage":
             state["usage"]["prompt_tokens"] = _ev["prompt_tokens"]
             state["usage"]["completion_tokens"] = _ev["completion_tokens"]
+            # 扣费幂等键（P1-②，2026-10-11）：uid 由 stream_llm 每次上游调用生成并随
+            # usage 事件带出，原先这里只拷 token 数把它丢了 → runner 扣费无载体
+            attach_bill_uid(state["usage"], _ev.get("bill_uid") or "")
             if await is_cancelled_remote(task_id):
                 return state, True
         elif _ev["type"] == "content":
             chunk = _ev["text"]
             piece, blocked = _content_guard.feed(chunk)
             if blocked:
-                state["content"] += sf.safe_message
-                await append_result(task_id, sf.safe_message)
+                state["content"] += safety_message(None, sf.safe_message)
+                await append_result(task_id, safety_message(None, sf.safe_message))
                 state["blocked"] = True
                 _stream_blocked = True
                 # 拦截后排空内层流拿 usage 尾块计费（原代码 break 遗弃生成器）
@@ -86,6 +91,8 @@ async def _consume_llm_stream(task_id: str, api_key: str, messages: list, tools:
                     if _rest["type"] == "usage":
                         state["usage"]["prompt_tokens"] = _rest["prompt_tokens"]
                         state["usage"]["completion_tokens"] = _rest["completion_tokens"]
+                        # 同一次上游调用：沿用已有键，不覆盖
+                        attach_bill_uid(state["usage"], _rest.get("bill_uid") or "")
                 break
             if piece:
                 state["content"] += piece
@@ -108,8 +115,8 @@ async def _consume_llm_stream(task_id: str, api_key: str, messages: list, tools:
     if not _stream_blocked:
         tail, tail_blocked = _content_guard.flush()
         if tail_blocked:
-            state["content"] += sf.safe_message
-            await append_result(task_id, sf.safe_message)
+            state["content"] += safety_message(None, sf.safe_message)
+            await append_result(task_id, safety_message(None, sf.safe_message))
             state["blocked"] = True
         elif tail:
             state["content"] += tail
@@ -147,7 +154,8 @@ async def _run_discussion(user_query: str,
                         {"untrusted_tool_data": serialize_untrusted_value(result)},
                     )
         if orch.get_involved_agents() and len(agent_names) > 1:
-            return await orch.run(enable_phase2=False)
+            from ..core.config import ORCH_ENABLE_PHASE2
+            return await orch.run(enable_phase2=ORCH_ENABLE_PHASE2)
         return ""
     except Exception as orch_err:
         logger.warning(f"多Agent讨论异常: {orch_err}")
@@ -267,13 +275,17 @@ async def _fallback_chain(user_query: str, username: str):
         # Flash 侧已带日志；链上剩余异常吞掉，交给下方 not-yielded 兜底文案（P2 修复：不再裸 pass）
         logger.debug(f"降级链异常: {e}")
     if not yielded:
-        yield "服务繁忙，请稍后再试。"
+        # 答案级本地化：Flash 也失败时的兜底文案按界面语言切换（contextvar 由 runner 入口登记）
+        from ..services.chat_support import fallback_message
+        yield fallback_message()
 
 
 async def _fallback_flash(user_query: str, username: str):
     """降级：DeepSeek Flash"""
-    from ..services.chat_support import get_deepseek_key
+    from ..services.chat_support import attach_bill_uid, get_deepseek_key, safety_message
     from ..services.llm_streaming import _estimate_tokens, record_token_usage
+    # 本次上游调用一个扣费幂等键：真实 usage 尾块与断连估算同属这一笔费用
+    _bill_uid = uuid.uuid4().hex
     api_key = await get_deepseek_key()
     if not api_key:
         return
@@ -292,7 +304,7 @@ async def _fallback_flash(user_query: str, username: str):
             async with client.stream(
                 "POST", f"{DEEPSEEK_API_BASE}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": DEEPSEEK_FLASH_MODEL, "messages": [{"role": "user", "content": user_query}],
+                json={"model": LLM_FALLBACK_MODEL, "messages": [{"role": "user", "content": user_query}],
                       "stream_options": {"include_usage": True}, "max_tokens": 1024},
             ) as resp:
                 resp.raise_for_status()
@@ -306,7 +318,7 @@ async def _fallback_flash(user_query: str, username: str):
                                 data = json.loads(data_str)
                                 # include_usage 尾块 choices 为空，取值须容忍（同 chat_fallback 修复）
                                 if data.get("usage"):
-                                    _usage = data["usage"]
+                                    _usage = attach_bill_uid(data["usage"], _bill_uid)
                                 choices = data.get("choices") or [{}]
                                 chunk = choices[0].get("delta", {}).get("content", "")
                                 if chunk:
@@ -316,7 +328,7 @@ async def _fallback_flash(user_query: str, username: str):
                                     piece, is_blocked = guard.feed(chunk)
                                     if is_blocked:
                                         _blocked = True
-                                        yield sf.safe_message
+                                        yield safety_message(None, sf.safe_message)
                                         continue
                                     if piece:
                                         yield piece
@@ -327,18 +339,20 @@ async def _fallback_flash(user_query: str, username: str):
                     # 退化按已产出文本估算（正常完成路径已在下方按真实 usage 计费）
                     if username and _full:
                         record_token_usage(
-                            {"prompt_tokens": 0, "completion_tokens": _estimate_tokens(_full)},
+                            attach_bill_uid(
+                                {"prompt_tokens": 0, "completion_tokens": _estimate_tokens(_full)},
+                                _bill_uid),
                             username, "",
                             remark=f"断连估算补计费（任务降级 {_estimate_tokens(_full)} tokens）")
                     raise
                 if not _blocked:
                     tail, tail_blocked = guard.flush()
                     if tail_blocked:
-                        yield sf.safe_message
+                        yield safety_message(None, sf.safe_message)
                     elif tail:
                         yield tail
                 # 计入计费（2026-09-09 主人拍板）：任务降级路径原先零计量
                 if _usage:
                     record_token_usage(
-                        _usage, username, "", model=DEEPSEEK_FLASH_MODEL,
+                        _usage, username, "", model=LLM_FALLBACK_MODEL,
                     )

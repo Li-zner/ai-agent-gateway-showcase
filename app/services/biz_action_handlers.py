@@ -11,8 +11,10 @@
 2. 拒绝动 role=admin 的账号：worker 用的是应用主账号（超级用户），数据库层
    拦不住，自锁与团队锁死只能靠这里挡。控制台管理员本人也是 role=admin，
    所以这一条同时覆盖了"禁止禁用自己"。
-3. 支付渠道只碰 is_active，不碰 fee_rate/min_amount/max_amount——费率是资金
-   口径，走 payment/admin_routes.py 的既有端点（该端点本期保留为已知旁路）。
+3. 支付渠道只碰 is_active，不碰 min_amount/max_amount/fee_rate。额度上下限走
+   payment/admin_routes.py 的既有端点（该端点本期保留为已知旁路，需审批请改走本动作面）；
+   fee_rate 自 2026-10-11 起在该端点降为只读探测位——本仓计费读 TOKEN_COST_RATE，
+   渠道手续费没有任何消费点，两边都不该写它。
 """
 from __future__ import annotations
 

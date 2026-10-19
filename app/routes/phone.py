@@ -14,13 +14,13 @@ from ..core.logging import setup_logging
 from ..core.redis import get_redis
 from ..core.db import get_pool
 from ..core.config import (
-    SMS_CODE_EXPIRE_SECONDS, SMS_SEND_MIN_INTERVAL, SMS_SEND_HOUR_LIMIT,
-    SMS_ATTEMPT_LIMIT, SMS_ATTEMPT_LOCK_SECONDS, PASSWORD_MAX_BYTES,
+    SMS_CODE_EXPIRE_SECONDS, PASSWORD_MAX_BYTES,
 )
 from ..core.password import hash_password
 from ..core.sms import _mask_phone
 from ..middleware.auth import get_current_user, create_token_pair
 from .auth import _client_ip
+from .turnstile import TurnstileTokenRequest, turnstile_enabled, verify_turnstile
 
 logger = setup_logging()
 
@@ -87,17 +87,27 @@ return 1
 _USER_RENAME_INTENT_TTL_SECONDS = 24 * 3600
 
 
-from .sms_lua import (  # AUTH-1（09-20）：脚本外移，phone.py 曾破 600 行门禁
-    SMS_IP_DAY_LUA, SMS_SEND_LUA, VERIFY_CODE_LUA,
-)
 from ..services.sms_ip_quota import (  # 09-22 审查 P2：IP 日额度预检与上限同处
-    SMS_IP_DAY_LIMIT, assert_ip_day_headroom, ip_day_key,
+    assert_ip_day_headroom, assert_phone_day_headroom,
+)
+from .phone_sms import (  # 2026-09-29 拆出：短信限流/落账/验证码校验原语（防 600 行门禁）
+    check_sms_rate as _check_sms_rate,
+    check_sms_rate_ip as _check_sms_rate_ip,
+    verify_phone_code as _verify_phone_code,
+    phone_day_settle,
 )
 
 
-class PhoneSendCodeRequest(BaseModel):
-    """发送验证码请求"""
+class PhoneSendCodeRequest(TurnstileTokenRequest):
+    """发送验证码请求（Turnstile 令牌字段见 turnstile.TurnstileTokenRequest）"""
     phone: str = Field(..., pattern=r'^1\d{10}$')
+
+
+@router.get("/api/phone/turnstile-config")
+async def turnstile_config():
+    """公开配置端点：前端据此决定是否渲染人机挂件（site_key 空 = 功能关闭）"""
+    from .turnstile import turnstile_config_payload
+    return await turnstile_config_payload()
 
 
 class PhoneRegisterRequest(BaseModel):
@@ -133,75 +143,31 @@ class BindPhoneRequest(BaseModel):
     code: str = Field(..., min_length=1, max_length=12)
 
 
-async def _check_sms_rate(phone: str):
-    """发送频率限制：同一手机号 1 分钟 1 次、1 小时 5 次（单脚本原子，AUTH-1 收口）"""
-    r = await get_redis()
-    verdict = await r.eval(
-        SMS_SEND_LUA, 2,
-        f"phone_sms_min:{phone}",
-        f"phone_sms_hour:{phone}",
-        str(SMS_SEND_MIN_INTERVAL), str(SMS_SEND_HOUR_LIMIT), "3600",
-    )
-    if verdict == 0:
-        raise HTTPException(429, "短信发送次数已达上限，请稍后再试")
-    if verdict == -1:
-        raise HTTPException(429, "发送太频繁，请 1 分钟后再试")
-
-
-async def _check_sms_rate_ip(ip: str):
-    """IP 维度日上限**落账**（2026-09-09 审查 P1）：换号绕过 per-phone 限流时的
-    计费兜底；单脚本原子化同 AUTH-1。
-
-    2026-09-22 审查 P2：调用点从"发送前"移到"短信确实发出去之后"——原来
-    per-phone 分钟冷却抛 429、上游故障抛 503 时 IP 额度已经白扣，用户一条短信
-    没收到却耗尽当日额度。防轰炸语义没丢：发送前先走 services.assert_ip_day_headroom
-    只读预检（超额直接拒，不触发下发），落账仍是脚本内 INCR→超限 DECR 回滚，
-    等价"先查后增"却把并发窗口收进脚本——预检与落账之间最多溢出"同时在飞"
-    的条数，且溢出部分被回滚、不会累积。
-    """
-    r = await get_redis()
-    verdict = await r.eval(
-        SMS_IP_DAY_LUA, 1,
-        ip_day_key(ip),
-        str(SMS_IP_DAY_LIMIT), "86400",
-    )
-    if verdict == 0:
-        raise HTTPException(429, "今日发送次数已达上限，请明日再试")
-
-
-async def _verify_phone_code(phone: str, code: str):
-    """原子校验验证码（含错误次数防爆破）；成功时消费验证码与错误计数"""
-    r = await get_redis()
-    status = await r.eval(
-        VERIFY_CODE_LUA,
-        3,
-        f"phone_code_lock:{phone}",
-        f"phone_code:{phone}",
-        f"phone_code_attempts:{phone}",
-        str(code),
-        SMS_ATTEMPT_LIMIT,
-        SMS_ATTEMPT_LOCK_SECONDS,
-    )
-    if status == "locked":
-        raise HTTPException(429, "验证码错误次数过多，已锁定 15 分钟")
-    if status == "expired":
-        raise HTTPException(400, "验证码已过期，请重新发送")
-    if status == "invalid":
-        raise HTTPException(400, "验证码错误")
-    if status != "ok":
-        raise HTTPException(503, "验证码服务暂不可用，请稍后重试")
+# 短信限流/落账/验证码校验三原语已拆至 phone_sms.py（2026-09-29，防 600 行门禁）；
+# 下方以 `_check_sms_rate` 等别名引用，调用点不变。
 
 
 @router.post("/api/phone/send-code")
 async def send_phone_code(payload: PhoneSendCodeRequest, request: Request):
-    """发送手机验证码（阿里云短信；Pydantic 校验，A24）"""
+    """发送手机验证码（阿里云短信；Pydantic 校验，A24）
+
+    Turnstile（A-P1-4，2026-09-29）：服务端启用（双 key 齐全）时，
+    人机令牌缺失/校验失败直接 403——放在所有限流之前（最便宜的最先拒）。
+    换 IP+换号的短信轰炸需要先过 Cloudflare 人机验证。
+    """
+    if turnstile_enabled() and (not payload.turnstile_token or not await verify_turnstile(
+            payload.turnstile_token, _client_ip(request))):
+        raise HTTPException(status_code=403, detail="人机验证未通过，请重试")
     phone = payload.phone
     ip = _client_ip(request)
     # IP 维度兜底限流（2026-09-09 审查 P1：换号绕过 per-phone 限流的场景）。
     # 09-22 审查 P2：这里只做只读预检，额度实扣见下面发送成功分支
     await assert_ip_day_headroom(ip)
+    # 单号日额度预检（批1 A-P1-2：3 条/日，换 IP 也换不出第四条）
+    await assert_phone_day_headroom(phone)
     # 发送频率限制（P0 #6 防短信轰炸：1 分钟 1 次 / 1 小时 5 次）
-    await _check_sms_rate(phone)
+    r_rate = await get_redis()
+    await _check_sms_rate(r_rate, phone)
     # 生成随机6位验证码（2026-09-12 清欠 P2：改 CSPRNG，与全文件 secrets 用法一致）
     code = str(secrets.randbelow(900000) + 100000)
     # 存入 Redis（有效期走配置常量，P2 #10）
@@ -212,7 +178,9 @@ async def send_phone_code(payload: PhoneSendCodeRequest, request: Request):
     sent = await send_sms(phone, code)
     if sent:
         # 短信确实出去了才扣 IP 日额度（2026-09-22 审查 P2，详见 _check_sms_rate_ip）
-        await _check_sms_rate_ip(ip)
+        await _check_sms_rate_ip(r, ip)
+        # 同一口径扣单号日额度（批1 A-P1-2）：失败路径不扣，扣了不累积（脚本内回滚）
+        await phone_day_settle(r, phone)
         # 日志脱敏（kefa 红线：日志禁明文手机号，2026-09-07 审查 P1）
         logger.info(f"验证码已发送: phone={_mask_phone(phone)}")
         return {"message": "验证码已发送", "phone": phone}
@@ -251,7 +219,7 @@ async def phone_register(payload: PhoneRegisterRequest):
     if len(password.encode("utf-8")) > PASSWORD_MAX_BYTES:
         raise HTTPException(400, f"密码长度不能超过 {PASSWORD_MAX_BYTES} 字节")  # C7：策略上限（SHA-256 预处理）
     # 校验验证码（含错误次数防爆破，P0 #6）
-    await _verify_phone_code(phone, code)
+    await _verify_phone_code(await get_redis(), phone, code)
     # 检查手机号是否已注册
     pool = await get_pool()
     async with pool.acquire(timeout=5) as conn:
@@ -298,7 +266,7 @@ async def phone_login(payload: PhoneLoginRequest):
     # 手机号即改名后的用户名，登录前先收敛可能遗留的改名迁移。
     await _recover_identity_migration(phone)
     # 校验验证码（含错误次数防爆破，P0 #6）
-    await _verify_phone_code(phone, code)
+    await _verify_phone_code(await get_redis(), phone, code)
     # 查找或自动创建用户（自动注册放事务内，P0 #12：INSERT 成功后仅签发 token 阶段失败会回滚）
     pool = await get_pool()
     is_new = False
@@ -363,8 +331,8 @@ async def _cascade_rename_user(conn, old_username: str, new_username: str):
 
 def _identity_daily_keys(username: str) -> tuple[str, str]:
     """构造用户当日请求数/Tokens 两个 Redis 键，供改名迁移复用。"""
-    from datetime import datetime, timezone as _tz
-    today = datetime.now(_tz.utc).strftime("%Y-%m-%d")
+    from ..core.day_window import quota_day
+    today = quota_day()
     return f"daily_req:{username}:{today}", f"daily_token:{username}:{today}"
 
 
@@ -525,7 +493,7 @@ async def bind_phone(payload: BindPhoneRequest, current_user: dict = Depends(get
     username = current_user["username"]
     await _recover_identity_migration(username)
     # 校验验证码（含错误次数防爆破，P0 #6）
-    await _verify_phone_code(phone, code)
+    await _verify_phone_code(await get_redis(), phone, code)
     new_username = phone
     pool = await get_pool()
     async with pool.acquire(timeout=5) as conn:

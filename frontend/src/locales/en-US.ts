@@ -139,6 +139,7 @@ export default {
   "fill_phone_code": "Please enter phone number and code",
   "agree_required": "Please read and agree to the User Agreement",
   "code_sent": "Code sent, please check your SMS",
+  "turnstile_pending": "Please complete the human verification above first",
   "send_failed_2": "Failed to send",
   "analyze_file": "Please analyze this file",
   "travel_mode": "Travel",

@@ -11,7 +11,7 @@ import uuid
 
 from ..core.logging import setup_logging
 from ..core.persona_manager import is_civil_persona
-from ..core.config import SUMMARY_THRESHOLD, DEEPSEEK_MODEL
+from ..core.config import SUMMARY_THRESHOLD, LLM_PRIMARY_MODEL
 from ..core.memory_manager import MemoryManager
 from ..core.task_manager import (
     update_status,  # noqa: F401 — 本模块命名空间绑定，task_stages 经 getattr 晚绑定回读
@@ -42,7 +42,8 @@ async def _try_cache_hit(task_id: str, username: str, user_query: str, mm, cache
         from ..core.safety_filter import get_filter
         sf = get_filter()
         if sf.contains_sensitive(cached):
-            cached = sf.safe_message
+            from ..services.chat_support import safety_message
+            cached = safety_message(None, sf.safe_message)
         # 分块写入 Redis
         for i in range(0, len(cached), 80):
             chunk = cached[i:i + 80]
@@ -129,7 +130,8 @@ async def _maybe_simple_task(task_id: str, username: str, conversation_id: str,
                 "method": "civil_forced",
             }
         else:
-            intent = await classify_intent(user_query, use_llm=False, username=username)
+            from ..core.config import INTENT_USE_LLM
+            intent = await classify_intent(user_query, use_llm=INTENT_USE_LLM, username=username)
         logger.info(f"意图分类: agents={intent['agents']}, simple={intent['is_simple']}, method={intent.get('method','?')}")
 
         if intent["is_simple"] and intent["agents"]:
@@ -184,12 +186,14 @@ async def _finish_text_answer(task_id: str, user_query: str, mm, full_content: s
     # DFA 终检兜底：check_stream 逐块检查拦不住跨块拼接的敏感词，只有这里能拦
     # （ponytail: 跨块词此时已进轮询缓冲只能补记不能撤回；彻底解决需在 append 侧做跨块
     #  滑动窗口，敏感词表目前是整词命中，跨块概率极低，暂不值得）
-    final_answer = full_content or "抱歉，我暂时无法回答。"
+    from ..services.chat_support import empty_answer
+    final_answer = full_content or empty_answer()
     cache_allowed = write_cache and bool(full_content)
     if sf.contains_sensitive(final_answer):
-        final_answer = sf.safe_message
+        from ..services.chat_support import safety_message, content_filtered_note
+        final_answer = safety_message(None, sf.safe_message)
         cache_allowed = False
-        await append_result(task_id, "\n\n[内容已过滤]")
+        await append_result(task_id, "\n\n" + content_filtered_note())
 
     # 先以 CAS 确认任务仍是 active。取消/超时后不得再写长期记忆或缓存。
     completed = await finish_task(task_id, final_answer)
@@ -239,7 +243,8 @@ async def _finish_task_max_steps(task_id: str, user_query: str, mm, cache_ctx: s
             from ..services.civil_grounding import grounding_reply
             final_text = grounding_reply("service_error")
         else:
-            final_text = "抱歉，我暂时无法回答。"
+            from ..services.chat_support import empty_answer
+            final_text = empty_answer()
     await _finish_text_answer(
         task_id, user_query, mm, final_text, cache_ctx, get_filter(),
         persona_id=persona_id, write_cache=False,
@@ -269,13 +274,13 @@ async def _run_react_loop(task_id: str, username: str, user_query: str,
             state, done = await _consume_llm_stream(task_id, api_key, messages, tools, sf)
         except Exception as e:
             from ..core.metrics import llm_requests_total as _lrt
-            _lrt.labels(model=DEEPSEEK_MODEL, endpoint='v2_task', status='error').inc()  # 2026-09-11 审查 P1：告警接线
+            _lrt.labels(model=LLM_PRIMARY_MODEL, endpoint='v2_task', status='error').inc()  # 2026-09-11 审查 P1：告警接线
             logger.warning(f"DeepSeek API 失败 (step {step}): {e}")
             # 降级走 fallback（Flash）；降级中被取消则任务已终结
             if await _stream_fallback(
                     task_id, user_query, username, persona_id=persona_id):
                 return
-            llm_requests_total.labels(model=DEEPSEEK_MODEL, endpoint='v2_task', status='fallback').inc()
+            llm_requests_total.labels(model=LLM_PRIMARY_MODEL, endpoint='v2_task', status='fallback').inc()
             break
 
         # ---- Token 计量 ----
@@ -284,9 +289,9 @@ async def _run_react_loop(task_id: str, username: str, user_query: str,
         if pt or ct:
             llm_tokens_total.labels(type='input').inc(pt)
             llm_tokens_total.labels(type='output').inc(ct)
-            llm_tokens_detail.labels(model=DEEPSEEK_MODEL, endpoint='v2_task', type='input').inc(pt)
-            llm_tokens_detail.labels(model=DEEPSEEK_MODEL, endpoint='v2_task', type='output').inc(ct)
-        llm_requests_total.labels(model=DEEPSEEK_MODEL, endpoint='v2_task', status='success').inc()
+            llm_tokens_detail.labels(model=LLM_PRIMARY_MODEL, endpoint='v2_task', type='input').inc(pt)
+            llm_tokens_detail.labels(model=LLM_PRIMARY_MODEL, endpoint='v2_task', type='output').inc(ct)
+        llm_requests_total.labels(model=LLM_PRIMARY_MODEL, endpoint='v2_task', status='success').inc()
         # 2026-09-09 审查 P0：任务路径原先只打指标，从不扣费也不计日 token
         # （"旁路漏扣费"历史教训同类）；指标已由上方 v2_task 打点，复用不含指标的
         # bill_token_usage 补齐钱包扣费与日 token 计数，避免双计
@@ -329,10 +334,14 @@ async def _run_react_loop(task_id: str, username: str, user_query: str,
 
 
 async def _build_cache_ctx(mm, username: str, persona_id: str,
-                           user_query: str, lang: str = "") -> tuple[str, bool]:
-    """返回缓存上下文和是否可缓存；已有历史的会话跳过缓存。
+                           user_query: str, lang: str = "",
+                           file_ids=None, user_perms=None) -> tuple[str, bool]:
+    """返回缓存上下文和是否可缓存；已有历史**或带文件**的请求跳过缓存。
 
     模型维度在任务路径此处尚未解析，留空即可：缓存键不同只会少命中，不会串答案。
+    2026-09-28 L1：带 file_ids 不吃缓存——对齐流式路 serve_from_cache 的豁免条件
+    （chat_stream_core），否则同用户换文件问同一句会回放旧文件的答案（缓存键
+    不含文件维度）。L5：cache_ctx 并入权限指纹，升级 vip 后不再命中旧公开权限回答。
     """
     try:
         _task_profile = await mm.get_profile()
@@ -342,14 +351,15 @@ async def _build_cache_ctx(mm, username: str, persona_id: str,
     # 独立首轮问答允许跨会话复用；有历史时 cacheable=False，避免上下文串答。
     cache_ctx = SemanticCache.build_cache_ctx(
         username, persona_id, _task_profile, "", user_query=user_query,
-        lang=lang or "",
+        lang=lang or "", user_perms=user_perms,
     )
     try:
         history = await mm.get_context(limit=1) if mm is not None else []
     except Exception as history_err:
         logger.warning(f"任务历史探测失败，跳过缓存: {history_err}")
         history = [object()]
-    return cache_ctx, not bool(history)
+    cacheable = not bool(history) and not file_ids
+    return cache_ctx, cacheable
 
 
 async def _enter_cache_gate(task_id: str, username: str, user_query: str,
@@ -404,9 +414,12 @@ async def run_agent_task(
     本函数只管 trace 生命周期与终态收口。"""
     # uuid 后缀（与 chat_stream_ctx 同一修复）：秒级时间戳同秒并发任务共用会话
     conv_id = conversation_id or f"conv_{username}_{uuid.uuid4().hex[:12]}"
-    mm = MemoryManager(username, conv_id)
+    mm = MemoryManager(username, conv_id, persona_id)
     params = {"persona_id": persona_id, "file_ids": file_ids,
               "lang": lang, "user_perms": user_perms}
+    # 登记界面语言：步骤原语（react_steps）无 lang 形参，兜底/安全文案据此切中/英。
+    from ..services.chat_support import set_request_lang
+    set_request_lang(lang)
     # 后台任务自行建立请求级 trace，finally 统一收尾。
     from ..services.rag_request_trace import begin_request, finish_request, mark_route
     begin_request(conversation_id=conv_id, username=username)

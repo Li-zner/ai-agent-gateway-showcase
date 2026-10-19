@@ -7,7 +7,6 @@ import asyncio
 import json
 import os
 import time
-from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
@@ -18,7 +17,7 @@ from ..core.task_manager import (
     CLAIM_IN_PROGRESS,
 )
 from ..agents.runner import run_agent_task
-from ..core.redis import get_redis
+from ..core.redis import get_redis, incr_arm_ttl
 from ..core.quota import reserve_used_questions, rollback_used_questions, QuotaDependencyError
 from ..core.logging import setup_logging
 
@@ -34,14 +33,21 @@ _USER_TASK_SLOT_PREFIX = "task:active_slots:user:"
 
 
 async def _try_reserve_task_slot() -> bool | None:
-    """尝试预留一个全局后台任务槽位（Redis INCR/DECR 原子计数）；已满返回 False"""
+    """尝试预留一个全局后台任务槽位（Redis INCR/DECR 原子计数）；已满返回 False
+
+    计数与 TTL 一次原子下发（2026-10-08 第四轮 D1）：原先 INCR、超限 DECR、
+    EXPIRE 分三条命令，进程在 INCR 与 EXPIRE 之间被杀就留下无 TTL 的槽位计数，
+    泄漏的槽位永不归零——全局上限 50 会被慢慢吃干，之后所有后台任务都起不来。
+    TTL 口径同时从"每次预留都续期"改为"缺 TTL 才挂"（同一条 P2 的成因：有流量
+    就永不自愈）。代价是键到期时计数直接归零，若那一刻仍有任务在跑会出现一段
+    短暂超卖；相比原先的永久欠放，可自愈的超卖是可接受的那一侧。
+    """
     try:
         r = await get_redis()
-        count = await r.incr(_TASK_SLOT_KEY)
+        count = await incr_arm_ttl(r, _TASK_SLOT_KEY, 86400)  # 全实例都停时可自愈清零
         if count > MAX_CONCURRENT_TASKS:
             await r.decr(_TASK_SLOT_KEY)  # 原子回滚，不占槽
             return False
-        await r.expire(_TASK_SLOT_KEY, 86400)  # 全实例都停时可自愈清零
         return True
     except Exception as e:
         logger.warning(f"任务槽位 Redis 计数失败（fail-open 放行）: {e}")
@@ -49,15 +55,18 @@ async def _try_reserve_task_slot() -> bool | None:
 
 
 async def _try_reserve_user_task_slot(username: str) -> bool | None:
-    """预留单用户任务槽，防一个账号占满全局后台任务并发。"""
+    """预留单用户任务槽，防一个账号占满全局后台任务并发。
+
+    口径同 _try_reserve_task_slot（原子下发 + 缺 TTL 才挂）：这里泄漏一个槽位
+    就是把该账号永久压在 per-user 上限之下，比短暂超卖更糟。
+    """
     key = f"{_USER_TASK_SLOT_PREFIX}{username}"
     try:
         r = await get_redis()
-        count = await r.incr(key)
+        count = await incr_arm_ttl(r, key, 86400)
         if count > MAX_CONCURRENT_TASKS_PER_USER:
             await r.decr(key)
             return False
-        await r.expire(key, 86400)
         return True
     except Exception as e:
         logger.warning(f"用户任务槽位 Redis 计数失败（fail-open 放行）: {e}")
@@ -116,7 +125,7 @@ async def _task_quota_gate(username: str, role: str) -> bool:
     )
     if not await check_qps(username, role):
         raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    from ..core.day_window import quota_day; today = quota_day()
     reserved = await reserve_daily_request(username, today, role)
     if reserved == 1:
         raise HTTPException(status_code=429, detail="今日请求次数已达上限")
@@ -177,7 +186,7 @@ async def create_agent_task(req: CreateTaskRequest, current_user: dict) -> dict:
     """
     username = current_user["username"]
     role = current_user.get("role", "user")
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    from ..core.day_window import quota_day; today = quota_day()
     # 幂等：同一 username+conversation + 相同消息 10秒内复用（P0 #5：键含 username 防跨用户串号；
     # P1 #42：SET NX 原子占位替代 GET 后再创建的竞态窗口）。
     # 2026-09-14 审计 P1：占位等待超时返回 CLAIM_IN_PROGRESS——创建方仍在建或已崩溃，
@@ -331,7 +340,7 @@ async def resume_agent_task(task_id: str, task: dict, username: str,
     user_slot_reserved = False
     quota_reserved = False
     daily_reserved = False
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    from ..core.day_window import quota_day; today = quota_day()
     try:
         # 恢复也是一次新 LLM 任务：试用额度与日配额复查（原 create 有、resume 漏）
         daily_reserved = await _task_quota_gate(username, role)

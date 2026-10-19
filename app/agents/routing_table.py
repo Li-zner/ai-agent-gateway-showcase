@@ -312,6 +312,13 @@ _COLLOQUIAL_MAP = {
     "三年时效": "普通诉讼时效三年 民法典第一百八十八条",
 }
 
+# Step 1 单趟替换用（2026-10-07 C1/P1-1）：按长度降序拼 alternation，在原文上一次扫描。
+# 旧的逐条 str.replace 循环会回扫上一轮写入的法律术语——"高空抛物"的值含"侵权"，
+# 随后"侵权"再被映射，mapped_query 拼出两个法条号，词面在任何条文里都不存在。
+_COLLOQUIAL_PATTERN = re.compile(
+    "|".join(re.escape(k) for k in sorted(_COLLOQUIAL_MAP, key=len, reverse=True))
+)
+
 
 # ============================================================
 # 4. 民法典法条编号正则（检测是否引用了民法典）
@@ -407,10 +414,7 @@ def route_query(query: str) -> RoutingResult:
             )
 
     # Step 1: 口语→术语映射（优先进行，使 mapped_query 在所有路径中可用；全部替换，P2 #39）
-    _mapped_query = query
-    for _colloquial, _legal in sorted(_COLLOQUIAL_MAP.items(), key=lambda x: -len(x[0])):
-        if _colloquial in _mapped_query:
-            _mapped_query = _mapped_query.replace(_colloquial, _legal)
+    _mapped_query = _COLLOQUIAL_PATTERN.sub(lambda m: _COLLOQUIAL_MAP[m.group()], query)
     _mq = dict(mapped_query=_mapped_query, has_mapping=(_mapped_query != query))
 
     # Step 2: 检测是否引用了民法典法条编号

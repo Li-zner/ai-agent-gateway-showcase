@@ -59,6 +59,22 @@ _ASSERT_CHANGE_RE = re.compile(r"(?:改成|改为|调整为|变成|换成|设为
 _BARE_TOUR_DEST_RE = re.compile(
     r"([\u4e00-\u9fa5]{2,6}?)(?:市)?(?:旅游|旅行|游玩)"
 )
+# 英文标志词 + 紧邻中文地名：EN/中文混查场景（句子是英文、城市名是中文，如
+# "traveling from 梧州市 to 盐城"）。此前所有目的地正则都要求中文标志词
+# （去/到/前往/飞）紧邻地名，英文句式没有这些词、城市又常在 68 城表外，于是
+# extract_destination 返回空——2026-10-15 活体复现：梧州→盐城英文查询被
+# recommend 路径反问"想去哪个城市"。只抓 CJK 串、标志词前设字母边界、标志词
+# 后须跟空白，纯中文句不会命中（无 " to " 空格边界）；可信度仍过 _plausible_name。
+# ponytail: "to 大家/我们"这类中文代词仍可能误判，彻底收口交 tools 层 geocode 校验。
+_EN_DEST_RE = re.compile(
+    r"(?<![A-Za-z])(?:to|toward|towards|visiting|visit|flying to|going to"
+    r"|travel(?:ing)? to|head(?:ing)? to|arrived? in)\s+"
+    r"([\u4e00-\u9fa5]{2,8}?)(?:市)?(?=[\s,，.。!！?？;；]|$)"
+)
+_EN_DEP_RE = re.compile(
+    r"(?<![A-Za-z])(?:from|leaving from|departing from|flying from)\s+"
+    r"([\u4e00-\u9fa5]{2,8}?)(?:市)?(?=[\s,，.。!！?？;；]|$)"
+)
 # 旅游词前的活动/范围词不是地名，避免"国内旅游/亲子旅游"被当城市。
 _NON_PLACE_TRAVEL_WORDS = {
     "国内", "周边", "亲子", "情侣", "自由", "自由行", "当地", "境外",
@@ -195,9 +211,24 @@ def default_city() -> str:
     仅 weather 路径的最后一级兜底（会话上下文里也找不到城市时才用）；
     hotel/food/route 仍走原话兜底交给子代理语义解析，不在此收口。
     """
-    import os
     from .config import DEFAULT_CITY
     return DEFAULT_CITY
+
+
+def geocode_contains(candidate: str, geocode: dict) -> bool:
+    """geocode 包含性守卫（weather 与路线规划共用，单一真相源）。
+
+    高德对垃圾输入也会模糊匹配（线上实测"我需要具体"被匹配到枣庄薛城区，
+    2026-09-10 weather 事故）：要求候选词出现在匹配结果的 city/district/
+    省/地址串里才认账，否则视为未找到。原先只 weather 有此守卫，路线规划的
+    geocode 漏同款（"从我家到你家"会被规划成两个随机城市）——两处定义
+    漂移第 12 例，2026-09-29 下沉共享。
+    """
+    if not candidate:
+        return False
+    matched = "".join(str(geocode.get(k) or "") for k in
+                      ("city", "district", "province", "formatted_address"))
+    return candidate in matched
 
 
 def extract_context_city(history: list | None) -> str:
@@ -309,6 +340,11 @@ def extract_departure(user_query: str) -> str:
             m.group(1), require_listed=True,
             asserted=bool(_ASSERT_CHANGE_RE.search(user_query))):
         return strip_shi(m.group(1))
+    # 英文出发标志词 + 中文地名（"from 梧州市"）：中文"从{c}"表扫描对英文句式
+    # 无从命中，这一层专补 EN/中文混查的出发地。
+    m = _EN_DEP_RE.search(user_query)
+    if m and _plausible_name(strip_shi(m.group(1))):
+        return strip_shi(m.group(1))
     for c in query_cities(user_query):
         if f"从{c}" in user_query:
             return c
@@ -329,6 +365,14 @@ def extract_destination(user_query: str) -> str:
             m.group(1), require_listed=True,
             asserted=bool(_ASSERT_CHANGE_RE.search(user_query))):
         return strip_shi(m.group(1))
+    # 英文目的标志词 + 中文地名（"to 盐城"/"visit 盐城"）：先于表扫描——既补 68
+    # 城表外的长尾城市，也避免"from 广州 to 盐城"里表内出发地广州被唯一候选兜底
+    # 当成目的地（英文句式没有中文"去/到"标志词，后续 marker 循环同样无从命中）。
+    dep_en = extract_departure(user_query)
+    for m in _EN_DEST_RE.finditer(user_query):
+        cand = strip_shi(m.group(1))
+        if cand != dep_en and _plausible_name(cand):
+            return cand
     cands = query_cities(user_query)
     dep = extract_departure(user_query)
     for c in cands:

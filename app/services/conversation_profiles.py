@@ -19,11 +19,19 @@ WEATHER_FORECAST_FIELD = "weather_forecast"
 MAX_WEATHER_DAYS = 3
 USER_PREVIEW_CHARS = 100
 
-_NAME_RE = re.compile(
-    r"(?:我叫|叫我|姓名\s*[:：]?|我是)\s*([\u4e00-\u9fa5A-Za-z]{1,20})"
-)
+# 批1 B-P1-4（2026-09-28）：主人拍板画像不记姓名——原先 _NAME_RE 含裸「我是」「姓名」
+# 且冒号可选，实测「我是来看法律的」抽成 name="来看法律的"。PROFILE_TEXT_FIELDS 里的
+# "name" 保留，只为存量行归一化与中控台展示，抽取支线不再新增。
+# 旅行上下文闸：命中才尝试抽目的地（否则"我叫张三"这类裸句子会被误当目的地）。
+# 原先只列中文词——EN/中文混查（"traveling ... to 盐城"）整个闸不命中，
+# extract_destination 根本不被调用，recommend 路径卡在"想去哪个城市"
+# （2026-10-15 活体复现）。补英文旅行词并忽略大小写；这只是布尔上下文闸，
+# 英文子串误命中（plan↮explain）最多触发一次无害的抽名尝试，抽不到就返回空。
 _TRAVEL_CONTEXT_RE = re.compile(
     r"旅游|旅行|游玩|度假|自由行|攻略|推荐|规划|行程|去|到|前往|出发"
+    r"|travel|trip|tour|vacation|itinerary|plan|visit|holiday"
+    r"|transportation|accommodation|flight",
+    re.IGNORECASE,
 )
 _COUNT_PATTERN = r"[0-9零一二两三四五六七八九十百千万]+"
 _PEOPLE_RE = re.compile(
@@ -125,14 +133,14 @@ async def persist_weather_snapshot(mm: Any, result: Any) -> bool:
 
 
 def extract_profile_updates(user_query: str) -> dict:
-    """从单轮用户问题提取画像字段；无上下文裸城市不误判为目的地。"""
+    """从单轮用户问题提取画像字段；无上下文裸城市不误判为目的地。
+
+    批1 B-P1-4（2026-09-28）：不再提取姓名，见模块内 _NAME_RE 删除处的说明。
+    """
     query = (user_query or "").strip()
     if not query:
         return {}
     updates = {}
-    name_match = _NAME_RE.search(query)
-    if name_match:
-        updates["name"] = name_match.group(1)
     people_match = _PEOPLE_RE.search(query)
     if people_match:
         groups = [g for g in people_match.groups() if g]
@@ -158,25 +166,6 @@ def extract_profile_updates(user_query: str) -> dict:
     if budget_match:
         updates["budget"] = budget_match.group(1)
     return updates
-
-
-def merge_profile(current: Any, updates: Any) -> dict:
-    """按字段合并画像；空串/None 不覆盖已有值。"""
-    profile = normalize_conversation_profile(current)
-    if not isinstance(updates, dict):
-        return profile
-    for key, value in updates.items():
-        if key not in profile or value is None or value == "":
-            continue
-        if key == WEATHER_FORECAST_FIELD:
-            if isinstance(value, list):
-                profile[key] = [
-                    _normalize_weather_day(item) for item in value[:MAX_WEATHER_DAYS]
-                    if isinstance(item, dict)
-                ]
-        else:
-            profile[key] = value
-    return profile
 
 
 def _row_profile(row: Any) -> dict:

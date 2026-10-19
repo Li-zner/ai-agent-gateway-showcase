@@ -11,7 +11,7 @@
 "能命中到什么"的边界写在下面，不再声称"保证可命中"。
 """
 from .semantic_cache import SemanticCache
-from .config import DEEPSEEK_MODEL
+from .config import LLM_PRIMARY_MODEL
 from .logging import setup_logging
 
 logger = setup_logging()
@@ -25,7 +25,7 @@ _HOT_ANSWERS = {
 
 # 预热条目所处的上下文维度：与 chat_stream_ctx.build_stream_ctx 生成键时用的
 # "无显式选择"默认值一一对应——人格走默认的统一助手、请求未带 lang 时取空串、
-# 模型取 persona.model 缺省的 DEEPSEEK_MODEL（真实选中的模型要等人格解析完才
+# 模型取 persona.model 缺省的 LLM_PRIMARY_MODEL（真实选中的模型要等人格解析完才
 # 知道，预热期拿不到，只能按默认人格的那一条）。
 _DEFAULT_PERSONA_ID = "unified"
 _DEFAULT_LANG = ""
@@ -45,7 +45,7 @@ async def warmup_semantic_cache():
     for query, answer in _HOT_ANSWERS.items():
         cache_ctx = SemanticCache.build_cache_ctx(
             "", _DEFAULT_PERSONA_ID, "", "",
-            user_query=query, lang=_DEFAULT_LANG, model=DEEPSEEK_MODEL,
+            user_query=query, lang=_DEFAULT_LANG, model=LLM_PRIMARY_MODEL,
         )
         try:
             await SemanticCache.set(query, answer, cache_ctx=cache_ctx)

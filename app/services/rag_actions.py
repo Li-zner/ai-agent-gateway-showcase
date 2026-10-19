@@ -70,7 +70,7 @@ def _action_row(row) -> dict:
     """动作记录转 API 输出。"""
     try:
         rollback_available = (
-            row["status"] == "succeeded"
+            row["status"] in ("succeeded", "failed")
             and get_action_spec(row["action_key"]).rollback is not None
         )
     except ValueError:
@@ -265,21 +265,54 @@ async def cancel_action(conn, action_id: int, actor: str) -> dict | None:
     return _action_row(row) if row else None
 
 
+async def _record_rollback_attempt(conn, action_id: int, actor: str) -> None:
+    """回滚动手前，在事务外留一条持久的「已发起」痕迹（台账 482，完整理由见服务修复日志）。
+
+    回滚器自备连接并自己提交、动作行却在外层事务最后提交，中间崩溃会留下「已回滚但
+    状态仍 succeeded」。本 UPDATE 走 autocommit 独立落库，对账时只要见 manual_attempt
+    而终态未动，即判定「已发起、结果未知」；正常路径下终态写回会覆盖整列，不留脏。
+    """
+    await conn.execute(
+        "UPDATE rag_remediation_actions "
+        # 列本身 JSONB NOT NULL DEFAULT '{}'（迁移 j1e2f3a4b5c6:40），直接 || 合并；
+        # $2 落在 jsonb_build_object 的 "any" 形参上，不显式 ::text 服务端推不出类型
+        "SET rollback_result=rollback_result || jsonb_build_object('manual_attempt', "
+        "       jsonb_build_object('by', $2::text, 'at', now()::text)), "
+        "    updated_at=now() "
+        "WHERE action_id=$1 AND status IN ('succeeded','failed')",
+        action_id, actor)
+
+
 async def rollback_action(conn, action_id: int, actor: str) -> dict | None:
-    """对已成功且有回滚函数的动作执行人工回滚。"""
+    """对已成功或已失败、且有回滚函数的动作执行人工回滚。
+
+    failed 也纳入（台账 481 副作用）：自动回滚失败的动作停在 failed 但 result 里的快照是真的，
+    原先只认 succeeded 等于此类动作再无第二次机会；拿不到真快照时回滚实现一律早退成 skipped，
+    由 _rollback_status 收成 failed，不会造出假「已撤销」。
+    """
+    await _record_rollback_attempt(conn, action_id, actor)
     async with conn.transaction():
         row = await conn.fetchrow(
             "SELECT * FROM rag_remediation_actions "
-            "WHERE action_id=$1 AND status='succeeded' FOR UPDATE",
+            "WHERE action_id=$1 AND status IN ('succeeded','failed') FOR UPDATE",
             action_id)
         if row is None:
             return None
-        spec = get_action_spec(row["action_key"])
-        if spec.rollback is None:
-            return None
-        rollback_result = await spec.rollback(
-            _json_value(row["params"]), _json_value(row["result"]))
-        status = "rolled_back" if rollback_result.get("passed") else "failed"
+        try:
+            spec = get_action_spec(row["action_key"])
+            if spec.rollback is None:
+                return None
+            rollback_result = await spec.rollback(
+                _json_value(row["params"]), _json_value(row["result"]))
+        except Exception as exc:
+            # 台账 482：回滚器抛业务错（如 ChangeSetError）曾直穿本函数 → 外层事务回滚、
+            # 动作仍是 succeeded、路由无 except → 中控台裸 500。违约的兜底放在框架边界：
+            # 收成 passed=False 让动作转 failed；回滚器用自备连接，不污染本 conn 事务状态。
+            logger.warning("RAG 动作 %s 人工回滚抛错（转 failed 交人工）: %s: %s",
+                           action_id, type(exc).__name__, exc)
+            rollback_result = {"passed": False, "error": type(exc).__name__,
+                               "reason": str(exc)[:200]}
+        status = _rollback_status(rollback_result)
         updated = await conn.fetchrow(
             "UPDATE rag_remediation_actions SET status=$1, rollback_result=$2::jsonb, "
             "executed_by=COALESCE(executed_by,$3), updated_at=now() "
@@ -287,6 +320,26 @@ async def rollback_action(conn, action_id: int, actor: str) -> dict | None:
             status, json.dumps(rollback_result, ensure_ascii=False),
             actor, action_id)
         return _action_row(updated) if updated else None
+
+
+async def check_action(conn, action_id: int, actor: str, note: str) -> dict | None:
+    """把执行失败的动作「人工已核对」终结：只翻状态与留痕，不碰任何业务数据。
+
+    台账 481 后续：无快照可撤销的 failed 动作点回滚只会反复写回 skipped，永远进不了
+    终态；人工核对过实际数据、确认「不再需要撤销」即落 `checked`。不复用 `cancelled`
+    （只发生在执行之前，语义是「什么都没发生」，会把真实写入算成零操作），也不复用
+    `rolled_back`（那是系统按快照撤销，这里是人来担保）。
+    """
+    row = await conn.fetchrow(
+        "UPDATE rag_remediation_actions SET status='checked', "
+        # 只加一个键：留痕与回滚结果同居 rollback_result，详情面板原样可见
+        # executed_by 不动——它是「谁执行了这次写」，把核对人塞进去会污染审计口径
+        "rollback_result=rollback_result || jsonb_build_object('manual_check', "
+        "  jsonb_build_object('by', $2::text, 'at', now()::text, 'note', $3::text)), "
+        "ended_at=COALESCE(ended_at,now()), updated_at=now() "
+        "WHERE action_id=$1 AND status='failed' RETURNING *",
+        action_id, actor, note)
+    return _action_row(row) if row else None
 
 
 async def _claim_next(conn, worker: str, environment: str) -> dict | None:
@@ -360,6 +413,20 @@ async def _requeue_action(conn, action_id: int, lease_token: str | None) -> bool
     ) is not None
 
 
+def _rollback_status(rollback_result: dict) -> str:
+    """回滚结果 → 动作终态。
+
+    `skipped` 是四个回滚实现共用的判空口径（快照里没有可恢复的原值就早退，
+    碰库之前返回 `passed=True, skipped=True`）——它表示**什么都没撤销**，
+    不能记成 rolled_back。台账 481 的假"已撤销"有两个入口：异常路径的盲回滚
+    （D5 已删）与这里的 skipped+passed=True；后者在人工回滚按钮放开
+    （failed 动作也可回滚）之后会被运营直接踩到，所以两个入口共用这一条判据。
+    """
+    if rollback_result.get("skipped"):
+        return "failed"
+    return "rolled_back" if rollback_result.get("passed") else "failed"
+
+
 async def verify_or_rollback(spec: ActionSpec, params: dict,
                              outcome: dict) -> tuple[str, dict, dict]:
     """按验证结果决定成功、回滚或失败。"""
@@ -375,9 +442,7 @@ async def verify_or_rollback(spec: ActionSpec, params: dict,
                 "passed": False,
                 "error": type(exc).__name__,
             }
-        if rollback_result.get("passed"):
-            return "rolled_back", verification, rollback_result
-        return "failed", verification, rollback_result
+        return _rollback_status(rollback_result), verification, rollback_result
     return "failed", verification, {}
 
 
@@ -420,7 +485,6 @@ async def _execute_locked_action(pool, lock_conn, lock_key: str,
     heartbeat = asyncio.create_task(
         _heartbeat_loop(pool, action["action_id"],
                         str(action["lease_token"])))
-    spec = None
     try:
         try:
             spec = get_action_spec(action["action_key"])
@@ -433,20 +497,20 @@ async def _execute_locked_action(pool, lock_conn, lock_key: str,
         except Exception as exc:
             logger.warning("RAG 动作 %s 执行失败: %s: %s",
                            action["action_id"], type(exc).__name__, exc)
-            rollback_result = {}
             status = "failed"
-            if spec is not None and spec.rollback is not None:
-                try:
-                    rollback_result = await spec.rollback(
-                        action["params"], {"error": type(exc).__name__})
-                    if rollback_result.get("passed"):
-                        status = "rolled_back"
-                except Exception as rollback_exc:
-                    logger.warning("RAG 动作 %s 回滚失败: %s: %s",
-                                   action["action_id"],
-                                   type(rollback_exc).__name__, rollback_exc)
             verification = {"passed": False}
             result = {"error": type(exc).__name__}
+            # 台账 481（2026-10-08 第四轮 D5）：异常路径不再调 spec.rollback。
+            # 这里能递给回滚器的只有 {"error": ...}，而四个回滚实现都按快照键
+            # 判空（was_active/applied/baseline_value）→ 一律 skipped+passed=True，
+            # 结果"账号不存在""管理员账号被拒"这类压根没写过库的失败被标成
+            # rolled_back，中控台以为已撤销，再没人去核对真实状态。
+            # 真正"写已提交后才失败"的场景本就不该走到这里：现有 handler 都在
+            # 提交后的复测/失效步骤自捕异常，带真快照返回 verification.passed=False，
+            # 由 verify_or_rollback 走快照回滚。到这里=连快照都没有，只能转人工。
+            rollback_result = {"passed": False, "skipped": True,
+                               "reason": "执行异常且无快照，未做盲回滚；"
+                                         "请核对是否已有提交，需要时人工回滚"}
 
         async with pool.acquire(timeout=5) as conn:
             finished = await _finish_action(

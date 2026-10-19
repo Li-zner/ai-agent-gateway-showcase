@@ -34,14 +34,14 @@ async def _format_via_llm(api_key: str, system: str, user_query: str,
     追问每条都失忆（主聊天通道同源 get_context，本通道漏接）。
     """
     from ..core.config import (
-        DEEPSEEK_MODEL,
+        LLM_PRIMARY_MODEL,
         HTTP_TIMEOUT_MEDIUM,
         apply_llm_request_options,
         llm_endpoint,
     )
     from ..core.metrics import llm_tokens_total, llm_tokens_detail, llm_requests_total
     # 主力模型可能是 qwen（百炼端点），按模型名路由端点与密钥
-    base_url, api_key = llm_endpoint(DEEPSEEK_MODEL, api_key)
+    base_url, api_key = llm_endpoint(LLM_PRIMARY_MODEL, api_key)
     messages = _build_formatter_messages(system, user_query, history)
     try:
         # 纳入全局 LLM 并发闸（2026-09-11 规则审查 P1：简单任务格式化是高频路径，
@@ -55,11 +55,11 @@ async def _format_via_llm(api_key: str, system: str, user_query: str,
                         f"{base_url}/chat/completions",
                         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                         json=apply_llm_request_options({
-                            "model": DEEPSEEK_MODEL,
+                            "model": LLM_PRIMARY_MODEL,
                             "messages": messages,
                             "temperature": 0.3,
                             "max_tokens": 1024
-                        }, DEEPSEEK_MODEL)
+                        }, LLM_PRIMARY_MODEL)
                     )
 
         resp = await _post()
@@ -68,15 +68,18 @@ async def _format_via_llm(api_key: str, system: str, user_query: str,
         content = data["choices"][0]["message"]["content"]
 
         # Token 计量
+        # 扣费幂等键（P1-②，2026-10-11）：本次即一次上游调用，一次一个键
+        from ..services.chat_support import attach_bill_uid
+        attach_bill_uid(data.get("usage"))
         usage = data.get("usage", {})
         pt = usage.get("prompt_tokens", 0) or 0
         ct = usage.get("completion_tokens", 0) or 0
         if pt or ct:
             llm_tokens_total.labels(type='input').inc(pt)
             llm_tokens_total.labels(type='output').inc(ct)
-            llm_tokens_detail.labels(model=DEEPSEEK_MODEL, endpoint='simple_task', type='input').inc(pt)
-            llm_tokens_detail.labels(model=DEEPSEEK_MODEL, endpoint='simple_task', type='output').inc(ct)
-        llm_requests_total.labels(model=DEEPSEEK_MODEL, endpoint='simple_task', status='success').inc()
+            llm_tokens_detail.labels(model=LLM_PRIMARY_MODEL, endpoint='simple_task', type='input').inc(pt)
+            llm_tokens_detail.labels(model=LLM_PRIMARY_MODEL, endpoint='simple_task', type='output').inc(ct)
+        llm_requests_total.labels(model=LLM_PRIMARY_MODEL, endpoint='simple_task', status='success').inc()
         # 扣费收口（2026-09-09 审查 P0）：指标已由上方 simple_task 打点，
         # 复用不含指标的 bill_token_usage 补钱包扣费与日 token 计数
         if username and (pt or ct):
@@ -133,6 +136,30 @@ async def _emit_simple_result(task_id: str, final_answer: str) -> str | None:
     return final_answer
 
 
+async def _deliver_simple_answer(mm, task_id: str, user_query: str,
+                                 final_answer: str, cache_allowed: bool,
+                                 cache_ctx: str | None, agent_name: str,
+                                 persona_id: str = "") -> bool:
+    """步骤 3 整体收口：emit → 拒答则禁缓存 → 存记忆/语义缓存（2026-10-09 拆出自 handle_simple_task）。
+
+    返回 False 表示 finish_task 终态 CAS 失败（任务已被取消/超时收口，B-11），
+    调用方必须直接结束，不得再写记忆与语义缓存。
+    """
+    emitted = await _emit_simple_result(task_id, final_answer)
+    if emitted is None:
+        logger.info(f"简单任务终态已被收口，跳过记忆/缓存写入: {task_id}")
+        return False
+    # _emit_simple_result 内 apply_safety_filter 命中会把整段换成 safe_message
+    # （拒答文案）；与 runner 主路 state["blocked"]→write_cache=False 同口径（C1/P1-3）
+    if emitted != final_answer:
+        cache_allowed = False
+    await _save_simple_task_artifacts(
+        mm, task_id, user_query, emitted, cache_ctx, agent_name,
+        persona_id, write_cache=cache_allowed,
+    )
+    return True
+
+
 def _fallback_tool_view(tool_result) -> str:
     """LLM 格式化失败时的可读降级视图（2026-09-14 审计 P1）。
 
@@ -162,21 +189,28 @@ def _fallback_tool_view(tool_result) -> str:
 
 async def _save_simple_task_artifacts(mm, task_id: str, user_query: str,
                                       final_answer: str, cache_ctx: str | None,
-                                      agent_name: str, persona_id: str = "") -> None:
-    """简单任务收尾：保存记忆 + 写语义缓存（2026-09-12 拆出自 handle_simple_task）。"""
+                                      agent_name: str, persona_id: str = "",
+                                      write_cache: bool = True) -> None:
+    """简单任务收尾：保存记忆 + 写语义缓存（2026-09-12 拆出自 handle_simple_task）。
+
+    write_cache=False 用于降级/拒答文案（2026-10-07 C1/P1-3）：语义缓存只认
+    query 相似不认文案性质，兜底文案一旦钉住 60 天，同问全部命中不可用提示。
+    """
     await mm.save_messages(
         {"role": "user", "content": user_query},
         {"role": "assistant", "content": final_answer}
     )
     try:
         from ..services.answer_trace import record_answer
+        # persona 空值兜底用 "default"（2026-09-28 R2）：原兜底 "civil_code" 会把
+        # 无人格归属的普通任务答案记进民事基准的答案侧，评测集被通用流量污染
         record_answer(
             user_query, final_answer, getattr(mm, "user_id", ""),
-            persona=persona_id or "civil_code",
+            persona=persona_id or "default",
         )
     except Exception as e:
         logger.debug(f"简单任务答案 trace 创建失败（不影响主流程）: {e}")
-    if cache_ctx is not None:
+    if cache_ctx is not None and write_cache:
         # spawn 持强引用，防止缓存写入任务被 GC 中途回收。
         from ..core.semantic_cache import safe_set
         from ..core.concurrency import spawn

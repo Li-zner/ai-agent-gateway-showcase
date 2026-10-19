@@ -6,7 +6,6 @@
 """
 import asyncio
 import json
-import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -175,7 +174,7 @@ async def clean_expired_profiles():
 async def clean_stale_cache():
     """
     清理低频语义缓存：
-    - 删除 60 天未命中且创建超过 7 天的缓存
+    - 创建超 60 天且命中数 <2（冷条目），或超 180 天硬过期（防热门条目永生）
     """
     pool = await get_pool()
     cutoff = _utc_now() - timedelta(days=CACHE_CLEAN_DAYS)

@@ -6,6 +6,9 @@ import i18n from '../locales'
 
 const { t } = i18n.global
 
+// 模型控制标记（<|DSML|> 等伪工具调用骨架）：与后端 safety_filter 同口径，前端双保险
+const CONTROL_TOKEN_RE = /<[\|｜][^|｜<>]{0,40}[\|｜]>/g
+
 const LEAK_PATTERNS: RegExp[] = [
   /system prompt/i, /system_prompt/i, /systemPrompt/,
   /我的系统提示词/, /系统提示词要求/, /按照系统提示词/, /根据我的系统提示词/,
@@ -41,6 +44,7 @@ export function toolDisplayName(code: string): string {
 export function cleanReasoning(text: string): string {
   if (!text) return ''
   const filtered = text
+    .replace(CONTROL_TOKEN_RE, '')
     .split('\n')
     .filter((line) => {
       const s = line.trim()

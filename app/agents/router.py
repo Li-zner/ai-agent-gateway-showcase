@@ -14,67 +14,45 @@
 import json
 import asyncio
 import uuid
-import httpx
 from typing import List, Dict, Optional
 from ..core.logging import setup_logging
 from ..core.persona_manager import is_civil_persona
 from ..core.config import (
-    DEEPSEEK_MODEL, HTTP_TIMEOUT_SHORT, HTTP_TIMEOUT_MEDIUM, TOOL_TIMEOUT,
-    apply_llm_request_options, llm_endpoint,
+    HTTP_TIMEOUT_MEDIUM, TOOL_TIMEOUT,
 )
 from ..core.place_extract import extract_destination
 # 必须模块级导入：safe_set 是模块级函数，曾因 SemanticCache 只在
 # handle_simple_task 内局部导入而必然 NameError（被 except 吞掉，缓存静默不写入）
 # SemanticCache 模块级可解析是历史修复契约（09-06 NameError 事故），单测钉住
 from ..core.semantic_cache import SemanticCache, safe_set
-from ..core.concurrency import spawn
 
 # 简单任务的格式化/收尾原语已拆至 simple_task.py（2026-09-14：router.py 达 622 行
 # 硬限，按子系统边界搬迁）；以旧名 re-export，handle_simple_task 与历史测试无需改动。
 from .simple_task import (  # noqa: F401
-    _build_formatter_messages, _emit_simple_result, _fallback_tool_view,
+    _build_formatter_messages, _deliver_simple_answer, _emit_simple_result,
+    _fallback_tool_view,
     _format_via_llm, _load_file_ctx, _safe_history, _save_simple_task_artifacts,
+)
+
+# 意图词表与命中判定已拆至 intent_lexicon.py（2026-10-18：router.py 因接英文意图达 611 行，
+# 越过「单文件 ≤600 行」硬限，按子系统边界搬迁）。词表名沿用，classify_by_keywords 与
+# 既有测试的引用口径不变；match_terms 由私有 _match_terms 升为跨模块公开名。
+from .intent_lexicon import (  # noqa: F401
+    INTENT_KEYWORDS, RECOMMEND_PATTERNS, SIMPLE_MAX_DOMAINS,
+    LEGAL_SCENE_MARKERS, match_terms,
 )
 
 logger = setup_logging()
 
-# ============================================================
-# 关键词意图映射表
-# ============================================================
-INTENT_KEYWORDS: Dict[str, List[str]] = {
-    "query_weather": ["天气", "气温", "温度", "下雨", "晴天", "刮风", "气候", "气象",
-                      "天气预报", "几度", "多少度", "冷不冷", "热不热"],
-    "query_hotel":   ["酒店", "住宿", "旅馆", "民宿", "客房", "房间", "留宿", "过夜",
-                      "订房", "预约酒店", "宾馆", "入住"],
-    "query_route":   ["路线", "怎么去", "交通", "乘车", "驾车", "公交", "地铁", "到达", "前往",
-                      "开车", "打车", "坐车", "多远", "多久",
-                      "坐什么车", "几路", "导航", "怎么走"],
-    "query_food":    ["美食", "餐厅", "吃饭", "菜系", "小吃", "特色菜", "餐饮",
-                      "馆子", "饭馆", "食堂", "好吃", "推荐菜", "吃货", "去哪吃"],
-    "search_knowledge": ["民法典", "法律", "法条", "法规", "合同法", "侵权", "继承",
-                         "婚姻", "物权", "债权", "诉讼时效", "民事",
-                         "权利", "义务", "赔偿", "纠纷", "打官司"],
-    "web_search":    [],  # 由 LLM 自行判断是否调用，不通过关键词匹配
-}
-
-# 如果匹配"推荐"涵盖四个领域，则为全推荐模式
-RECOMMEND_PATTERNS = [
-    "推荐", "建议", "攻略", "安排", "规划行程", "旅游计划",
-    "有什么好玩", "帮我规划", "行程安排", "旅行攻略",
-    "重新规划", "调整行程", "修改行程", "改行程",
-    "改目的地", "改出发地", "目的地改成", "出发地改成",
-]
-
-# 如果匹配到多个领域的关键词，超过此数量视为复杂任务
-SIMPLE_MAX_DOMAINS = 1
-
 
 def _has_travel_trip_intent(query: str) -> bool:
     """识别“目的地 + 旅游/旅行”的规划意图，交给统一槽位澄清。"""
-    if any(marker in query for marker in ("民法典", "法律", "法条", "法规")):
+    # 法律场景不认作旅游规划（P1 #77）：判据走词表腿的「一把尺」match_terms
+    if match_terms(query, LEGAL_SCENE_MARKERS):
         return False
-    return bool(extract_destination(query)) and any(
-        marker in query for marker in ("旅游", "旅行", "游玩", "度假", "自由行")
+    return bool(extract_destination(query)) and match_terms(
+        query, ("旅游", "旅行", "游玩", "度假", "自由行",
+                "travel", "trip", "tour", "vacation", "visit", "holiday")
     )
 
 
@@ -85,18 +63,16 @@ def classify_by_keywords(query: str) -> Dict:
     """
     matched = set()
     for agent, keywords in INTENT_KEYWORDS.items():
-        for kw in keywords:
-            if kw in query:
-                matched.add(agent)
-                break  # 一个 agent 只计一次
+        if keywords and match_terms(query, keywords):
+            matched.add(agent)
     matched_list = sorted(matched)
 
     # 检测是否为全推荐模式
     # 条件：用户表达了全面的旅行规划需求
     is_recommend = False
-    has_recommend_kw = any(p in query for p in RECOMMEND_PATTERNS)
-    # 法律咨询场景的"推荐"不触发旅游全推荐（P2 #20：如"推荐一本民法典书籍"）
-    if has_recommend_kw and any(kw in query for kw in ("民法典", "法律", "法条", "法规")):
+    has_recommend_kw = match_terms(query, RECOMMEND_PATTERNS)
+    # 法律咨询场景的"推荐"不触发旅游全推荐（P2 #20；P1 #77 判据升级为词表腿 match_terms，英文法律句不再漏过）
+    if has_recommend_kw and match_terms(query, LEGAL_SCENE_MARKERS):
         has_recommend_kw = False
     # "渭南旅游/成都旅行"即使没有"推荐/规划"也是旅行规划意图，必须补出发地槽位。
     has_travel_trip = _has_travel_trip_intent(query)
@@ -106,9 +82,10 @@ def classify_by_keywords(query: str) -> Dict:
         # 2. 包含明确的全局规划意图词（攻略/规划/安排/行程等）
         # 3. 匹配了1个领域且包含推荐/安排/规划等词
         # 4. 已识别目的地且明确提到旅游/旅行
-        comprehensive_plan = any(p in query for p in [
+        comprehensive_plan = match_terms(query, [
             "攻略", "规划", "安排", "行程", "旅游计划",
-            "旅行攻略", "帮我规划", "帮我安排"
+            "旅行攻略", "帮我规划", "帮我安排",
+            "plan", "arrange", "itinerary",
         ])
         if len(matched_list) >= 2:
             is_recommend = True
@@ -172,9 +149,6 @@ async def classify_by_llm(query: str, username: str = "") -> Dict:
         logger.warning("LLM 分类无 API Key，回退关键词分类")
         return classify_by_keywords(query)
 
-    # 主力模型可能是 qwen（百炼端点），按模型名路由端点与密钥
-    base_url, api_key = llm_endpoint(DEEPSEEK_MODEL, api_key)
-
     system_prompt = """你是一个意图分类器。分析用户问题，判断涉及以下哪些领域（可多选）：
 - query_weather: 天气/气温相关
 - query_hotel: 酒店/住宿相关
@@ -194,34 +168,34 @@ async def classify_by_llm(query: str, username: str = "") -> Dict:
 
     try:
         from ..core.concurrency import llm_semaphore
-        # 纳入全局 LLM 并发闸（2026-09-10 审查 P2 对齐 orchestrator 同修法）
+        from ..services.chat_support import post_chat_completion
+        # 2026-09-30 校准修复（逻辑审阅 A1）：原先裸 httpx + HTTP_TIMEOUT_SHORT(5s)
+        # 打非流式补全，而主模型典型 10-17s（chat_support 埋点口径）——开关开了
+        # 也必超时回退关键词。改走 post_chat_completion 原语（sub_agents 同款）：
+        # flash 优先 + 主模型兜底 + Key 口径一致 + 熔断，超时 15s。
+        # max_tokens 100→300：flash 会先花预算在 reasoning_content 上（data_ask
+        # 实测口径），100 会挤空正文；分类提示词极小，300 无成本差异。
         async with llm_semaphore:
-            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SHORT) as client:
-                resp = await client.post(
-                    f"{base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json=apply_llm_request_options({
-                        "model": DEEPSEEK_MODEL,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": f"用户问题: {query}"}
-                        ],
-                        "response_format": {"type": "json_object"},
-                        "temperature": 0.0,
-                        "max_tokens": 100
-                    }, DEEPSEEK_MODEL)
-                )
-                resp.raise_for_status()
-                data = resp.json()
+            ok, data = await post_chat_completion(
+                {"messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"用户问题: {query}"}
+                ],
+                 "response_format": {"type": "json_object"},
+                 "temperature": 0.0,
+                 "max_tokens": 300},
+                HTTP_TIMEOUT_MEDIUM, prefer_flash=True)
+        if not ok:
+            raise ValueError(f"upstream {data.get('status')}")
 
         content = data["choices"][0]["message"]["content"]
+        if not content:
+            # flash 空 正文（预算被 reasoning 吃掉）按失败处理，走关键词回退
+            raise ValueError("empty content (flash reasoning budget)")
         result = json.loads(content)
         result["method"] = "llm"
-        # 计入计费（2026-09-09 主人拍板）：意图分类属用户请求触发（当前两调用方
-        # 均 use_llm=False，本路径为预留；口径先对齐，启用即计费）
+        # 计入计费（2026-09-09 主人拍板）：意图分类属用户请求触发（调用方由
+        # INTENT_USE_LLM 门控，默认关；口径先对齐，启用即计费）
         _usage = data.get("usage") or {}
         if username and (_usage.get("prompt_tokens") or _usage.get("completion_tokens")):
             from ..services.llm_streaming import record_token_usage
@@ -335,9 +309,13 @@ async def _run_simple_tool(agent_name: str, user_query: str, username: str,
 
 async def _format_simple_answer(api_key: str, user_query: str, username: str,
                                 persona_id: str, lang: str, agent_name: str,
-                                tool_result: dict, file_ids, history: list | None) -> str:
+                                tool_result: dict, file_ids,
+                                history: list | None) -> tuple[str, bool]:
     """基于工具结果生成回答；失败时降级为可读数据视图（不再回退原始 JSON）。
 
+    返回 (文本, 可写语义缓存)。降级/兜底文案 cache_allowed=False（2026-10-07 C1/P1-3）：
+    与 runner 主路 write_cache=not blocked 同契约——缓存认字不认人，拦不住降级文案，
+    一旦钉进 60 天，同问全部命中"服务暂时不可用"。
     wait_for 超时与 _format_via_llm 内部异常同口径：工具结果已在手，
     超时只是格式化环节失败，应降级 _fallback_tool_view 而非整任务报错
     （2026-09-15 审查 B-12）。
@@ -356,36 +334,45 @@ async def _format_simple_answer(api_key: str, user_query: str, username: str,
     except asyncio.TimeoutError:
         logger.warning(f"简单任务格式化超时，降级数据视图: tool={agent_name}")
         answer = None
-    return answer if answer is not None else _fallback_tool_view(tool_result)
+    if answer is None:
+        return _fallback_tool_view(tool_result), False
+    return answer, True
 
 
 async def _civil_simple_answer(user_query: str, username: str, persona_id: str,
                                lang: str, tool_result: dict, file_ids,
-                               history: list | None) -> str:
-    """民法典任务路径收口：有检索依据才调用模型，且回答必须通过引用溯源校验。"""
+                               history: list | None) -> tuple[str, bool]:
+    """民法典任务路径收口：有检索依据才调用模型，且回答必须通过引用溯源校验。
+
+    cache_allowed 口径（2026-10-07 C1/P1-3）：拒答/服务降级/未过溯源校验的文案
+    一律不入缓存——民事人格确定性通道的这类文案是"当前问题检索依据不足"，
+    钉 60 天等于把一个瞬时缺口固化成永久答案。
+    """
     from ..services.chat_support import get_deepseek_key
     from ..services.civil_grounding import (
         civil_tool_result, grounding_reply, validate_civil_answer,
     )
     if isinstance(tool_result, dict) and tool_result.get("mapping_hit"):
-        return tool_result.get("message") or grounding_reply("no_evidence", lang)
+        return tool_result.get("message") or grounding_reply("no_evidence", lang), False
     if civil_tool_result(tool_result) is None:
-        return grounding_reply("no_evidence", lang)
+        return grounding_reply("no_evidence", lang), False
     api_key = await get_deepseek_key()
     if not api_key:
-        return grounding_reply("service_error", lang)
-    answer = await _format_simple_answer(
+        return grounding_reply("service_error", lang), False
+    answer, _fmt_cache = await _format_simple_answer(
         api_key, user_query, username, persona_id, lang,
         "search_knowledge", tool_result, file_ids, history,
     )
     grounded, _ = validate_civil_answer(answer, tool_result)
-    return answer if grounded else grounding_reply("ungrounded", lang)
+    # 格式化降级视图不含条文依据，validate 必判 ungrounded；两处共 False 才放行
+    return (answer if grounded else grounding_reply("ungrounded", lang)), (grounded and _fmt_cache)
 
 
 async def _build_simple_answer(task_id: str, agent_name: str, user_query: str,
                                username: str, persona_id: str, lang: str,
-                               tool_result, file_ids, history) -> str | None:
-    """单工具结果 → 最终回答；返回 None 表示已由 fail_task 收口，调用方直接返回。
+                               tool_result, file_ids,
+                               history) -> tuple[str, bool] | None:
+    """单工具结果 → (最终回答, 可写缓存)；返回 None 表示已由 fail_task 收口，调用方直接返回。
 
     民法典人格走确定性通道（检索依据不足即拒答），其余走单次格式化调用。
     """
@@ -429,7 +416,7 @@ async def handle_simple_task(
     from ..core.memory_manager import MemoryManager
 
     conv_id = conversation_id or f"conv_{username}_{uuid.uuid4().hex[:12]}"
-    mm = MemoryManager(username, conv_id)
+    mm = MemoryManager(username, conv_id, persona_id)
 
     try:
         if not await update_status(task_id, "generating"):
@@ -458,27 +445,23 @@ async def handle_simple_task(
         logger.info(f"简单任务工具返回: agent={agent_name}, keys={list(tool_result) if isinstance(tool_result, dict) else type(tool_result).__name__}")
 
         # ---- 2. 轻量 LLM 格式化回答（单次调用）----
-        final_answer = await _build_simple_answer(
+        built = await _build_simple_answer(
             task_id, agent_name, user_query, username, persona_id, lang,
             tool_result, file_ids, history,
         )
-        if final_answer is None:
+        if built is None:
             return
+        final_answer, cache_allowed = built
         if await is_cancelled_remote(task_id):
             return
 
         # ---- 3. 写入结果：DFA 检查 → 分块写 Redis → 状态/记忆/语义缓存 ----
-        final_answer = await _emit_simple_result(task_id, final_answer)
-        if final_answer is None:
-            # 终态 CAS 失败（任务已被取消/超时收口）：与 runner 主路径同契约，
-            # 取消竞态下不得再写记忆与语义缓存（B-11）
-            logger.info(f"简单任务终态已被收口，跳过记忆/缓存写入: {task_id}")
+        # 收口逻辑在 simple_task._deliver_simple_answer（2026-10-09 拆出，压 handle_simple_task 行数）
+        if not await _deliver_simple_answer(
+            mm, task_id, user_query, final_answer, cache_allowed,
+            cache_ctx, agent_name, persona_id,
+        ):
             return
-
-        await _save_simple_task_artifacts(
-            mm, task_id, user_query, final_answer, cache_ctx, agent_name,
-            persona_id,
-        )
 
     except Exception as e:
         logger.error(f"简单任务异常: {e}", exc_info=True)

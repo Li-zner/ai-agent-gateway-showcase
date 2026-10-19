@@ -4,20 +4,6 @@
   min-height: 100vh;
 }
 
-/* ---------- 侧栏底部三层结构 ---------- */
-.sidebar-section {
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border-color);
-}
-.sidebar-section .section-label {
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-muted);
-  letter-spacing: 0.3px;
-  margin-bottom: 6px;
-}
-
 /* ---------- 三模式切换按钮（右上角）---------- */
 .mode-btn {
   background: var(--bg-body);
@@ -42,27 +28,7 @@
   color: #fff;
 }
 
-/* ---------- 主题三宫格与侧栏底部（对齐旧版 inline 样式） ---------- */
-.theme-picker {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 4px;
-}
-.theme-btn-pc {
-  padding: 6px 0;
-  border-radius: 6px;
-  border: 1.5px solid var(--border-color);
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.2s;
-  font-weight: 500;
-}
-.theme-btn-pc:hover {
-  border-color: var(--primary);
-  color: var(--primary);
-}
+/* ---------- 侧栏底部 ---------- */
 .sidebar-footer {
   margin-top: auto;
   font-size: 11px;
@@ -158,7 +124,6 @@
     min-height: 44px;
   }
   .chat-hamburger,
-  .logout-btn,
   .map-btn,
   .mode-btn,
   .wallet-btn {
@@ -194,8 +159,7 @@
   .header-actions {
     gap: 6px;
   }
-  .header-actions .mode-btn,
-  .logout-btn {
+  .header-actions .mode-btn {
     padding: 6px 10px;
     font-size: 12px;
   }
@@ -219,10 +183,6 @@
   /* 底部安全区：iPhone/iPad home indicator 不遮挡输入区 */
   .chat-input-area {
     padding-bottom: calc(16px + env(safe-area-inset-bottom));
-  }
-  /* 退出按钮收进抽屉（侧栏 footer 已有退出入口） */
-  .logout-btn {
-    display: none;
   }
   /* 地图按钮恢复显示（旧版断点曾隐藏） */
   .map-btn {

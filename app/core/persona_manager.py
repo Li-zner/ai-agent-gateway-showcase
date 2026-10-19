@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import Optional
 from ..core.logging import setup_logging
-from ..core.config import DEEPSEEK_MODEL
+from ..core.config import LLM_PRIMARY_MODEL
 from ..core.constants import get_persona_prompt, get_all_persona_ids
 
 logger = setup_logging()
@@ -26,6 +26,21 @@ def is_civil_persona(persona_id) -> bool:
     注意：只用于行为判断，不用于展示名/知识库加载（那些走 get_effective）。
     """
     return (persona_id or "").startswith("civil_code")
+
+
+# 评测人格 id（批量评测走真实 chat 端点时带的 persona）
+EVAL_PERSONA_ID = "civil_code_eval"
+
+
+def is_eval_persona(persona_id) -> bool:
+    """是否**评测流量**人格。
+
+    与 `is_civil_persona` 的分工别搞混：那一个是"民法典行为族"（含本评测人格，
+    用于检索强制/路由裁决等硬规则，评测必须与线上同链路）；而统计与画像口径要的
+    恰恰是**只排除评测、保留真实用户**——误用 `is_civil_persona` 会把线上民法典
+    用户的画像一起关掉（批1 B-P1-3 登记的原由）。
+    """
+    return (persona_id or "").startswith(EVAL_PERSONA_ID)
 
 
 class Persona:
@@ -149,8 +164,8 @@ class PersonaManager:
     def get_model(self, persona_id: Optional[str] = None) -> str:
         p = self._personas.get(persona_id) if persona_id else self.current
         if p:
-            return p.model or DEEPSEEK_MODEL
-        return DEEPSEEK_MODEL
+            return p.model or LLM_PRIMARY_MODEL
+        return LLM_PRIMARY_MODEL
 
     def get_enabled_tools(self, persona_id: Optional[str] = None) -> list:
         p = self._personas.get(persona_id) if persona_id else self.current

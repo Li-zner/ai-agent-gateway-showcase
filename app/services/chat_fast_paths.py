@@ -19,10 +19,12 @@ from ..core.place_extract import auto_tool_args
 from ..core.safety_filter import (
     ContentStreamGuard, format_untrusted_tool_context, get_filter, sanitize_error_text,
 )
-from ..core.stream_utils import dispatch_tool, build_file_context, sse
+from ..core.stream_utils import dispatch_tool, sse  # build_file_context 已移除（F1：文件上下文由 ctx.messages 承载，勿再拼）
 from .chat_stream_ctx import ChatStreamCtx, finalize_answer
+from .chat_react import _finalize_partial_answer  # 半截外发收口与 ReAct 同一口径（10-07 chat P2-1 旁路）
 from .chat_support import (
     display_safe_tool_result, hide_reasoning, lang_instruction, safe_format_prompt,
+    thinking_text, safety_message,
 )
 from .conversation_profiles import persist_weather_snapshot
 from .civil_grounding import (
@@ -92,17 +94,20 @@ def build_simple_tool_args(agent_name: str, ctx: ChatStreamCtx) -> Tuple[Dict, s
     if agent_name == "search_knowledge":
         q = ctx.civ_civil_mapped_query or ctx.user_query
         logger.info(f"search_knowledge 查询: {q[:80]}... (原: {ctx.user_query[:30]}...)")
-        return {"query": q}, "正在查询知识库..."
+        return {"query": q}, thinking_text("kb", ctx.req)
     args = auto_tool_args(agent_name, ctx.user_query)
     if agent_name == "query_weather":
-        return args, f"正在查询 {args.get('city', '')} 天气..."
+        return args, thinking_text("weather", ctx.req, city=args.get('city', ''))
     if agent_name == "query_hotel":
-        return args, f"正在搜索 {args.get('destination', '')} 酒店..."
+        return args, thinking_text("hotel", ctx.req, destination=args.get('destination', ''))
     if agent_name == "query_food":
-        return args, f"正在搜索 {args.get('destination', '')} 美食..."
+        return args, thinking_text("food", ctx.req, destination=args.get('destination', ''))
     if agent_name == "query_route":
-        return args, f"正在规划从 {args.get('departure', '')} 到 {args.get('destination', '')} 的路线..."
-    return args, "正在查询相关信息..."
+        return args, thinking_text(
+            "route", ctx.req,
+            departure=args.get('departure', ''), destination=args.get('destination', ''),
+        )
+    return args, thinking_text("search_info", ctx.req)
 
 
 def _fast_system_base(ctx: ChatStreamCtx) -> str:
@@ -136,11 +141,15 @@ def _messages_for_fast_path(ctx: ChatStreamCtx, system_content: str) -> list:
 
 
 async def _build_fast_system(ctx: ChatStreamCtx, agent_name: str, tool_result) -> str:
-    """简单任务：在 system_base 上追加工具结果/无数据引导 + 上传文件上下文"""
+    """简单任务：在 system_base 上追加工具结果/无数据引导
+
+    文件上下文由 ctx.messages[1:] 原样承载（_assemble_messages 已注入），此处
+    **不得重复拼接**（2026-09-28 chat 链审查 F1 修复）：原先再调一次
+    build_file_context 拼进 system，6 万字文件在 prompt 里出现两份——token
+    双倍计费，且 ctx.file_ctx_chars（L2 同会话只计一次的扣除依据）只记一份
+    长度，钱包口径与实际注入不符。
+    """
     _system = _fast_system_base(ctx)
-    _fc = await build_file_context(ctx.req, ctx.username)
-    if _fc:
-        _system += "\n\n" + _fc
     if tool_result is not None:
         _has_data = False
         if isinstance(tool_result, dict):
@@ -207,9 +216,11 @@ async def _finish_simple_terminal(ctx: ChatStreamCtx, text: str,
     """输出并收尾快速通道结果，供民法典确定性兜底复用。"""
     yield sse("answer_chunk", text)
     yield sse("answer_complete", text) + "data: [DONE]\n\n"
-    await finalize_answer(ctx, text, write_cache=write_cache)
+    # C-F11 契约（F2 顺序统一，2026-09-28）：[DONE] 已送达，先置位再 finalize——
+    # 即便未来 finalize 不再整体吞异常，也不会被上层当未送达而二次降级
     ctx.saved_normally = True
     ctx.finished = True
+    await finalize_answer(ctx, text, write_cache=write_cache)
 
 
 def _civil_stop_message(ctx: ChatStreamCtx, agent_name: str, tool_result) -> str | None:
@@ -241,9 +252,9 @@ async def _stream_fast_model(ctx: ChatStreamCtx, messages: list,
         elif kind == "answer":
             piece, blocked = guard.feed(text)
             if blocked:
-                state["text"] += sf.safe_message
+                state["text"] += safety_message(ctx.req, sf.safe_message)
                 state["interrupted"] = True
-                yield sse("answer_chunk", sf.safe_message)
+                yield sse("answer_chunk", safety_message(ctx.req, sf.safe_message))
                 break
             if piece:
                 state["generated"] = True
@@ -253,9 +264,9 @@ async def _stream_fast_model(ctx: ChatStreamCtx, messages: list,
     if not state["interrupted"]:
         tail, tail_blocked = guard.flush()
         if tail_blocked:
-            state["text"] = sf.safe_message
+            state["text"] = safety_message(ctx.req, sf.safe_message)
             state["interrupted"] = True
-            yield sse("answer_chunk", sf.safe_message)
+            yield sse("answer_chunk", safety_message(ctx.req, sf.safe_message))
         elif tail:
             state["generated"] = True
             state["text"] += tail
@@ -281,7 +292,8 @@ async def simple_fast_path(ctx: ChatStreamCtx) -> AsyncIterator[str]:
     agent_name = ctx.matched_agents[0] if not is_pure_chat else "chat"
     mark_route("simple_fast_path")
     logger.info(f"简单任务快速通道: agent={agent_name}")
-    yield sse("thought", '正在查询相关信息...' if not is_pure_chat else '正在思考...')
+    yield sse("thought", thinking_text("search_info" if not is_pure_chat else "thinking", ctx.req))
+    state: dict = {}  # 声明在 try 外：except 分支要能读到"已外发了多少"（10-07 chat P2-1 旁路）
     try:
         tool_result = None
         args = {}
@@ -298,7 +310,7 @@ async def simple_fast_path(ctx: ChatStreamCtx) -> AsyncIterator[str]:
                 from ..core.audit import audit
                 await audit(ctx.username, "kb_search", {"query": ctx.user_query[:200]})
             yield f"data: {json.dumps({'type': 'reasoning_done'})}\n\n"
-            yield f"data: {json.dumps({'type': 'tool_call', 'name': agent_name, 'args': args})}\n\n"
+            yield f"data: {json.dumps({'type': 'tool_call', 'name': agent_name, 'args': display_safe_tool_result(args)})}\n\n"
             yield f"data: {json.dumps({'type': 'tool_result', 'name': agent_name, 'index': 0, 'result': display_safe_tool_result(tool_result)})}\n\n"
 
         civil_buffer = is_civil_persona(ctx.persona_id) and agent_name == "search_knowledge"
@@ -309,7 +321,6 @@ async def simple_fast_path(ctx: ChatStreamCtx) -> AsyncIterator[str]:
             return
 
         system_fast = await _build_fast_system(ctx, agent_name, tool_result)
-        state = {}
         messages = _messages_for_fast_path(ctx, system_fast)
         async for event in _stream_fast_model(ctx, messages, civil_buffer, state):
             yield event
@@ -335,15 +346,23 @@ async def simple_fast_path(ctx: ChatStreamCtx) -> AsyncIterator[str]:
         if agent_name == "search_knowledge":
             _record_ungrounded_citations(result_text, tool_result)
         yield sse("answer_complete", result_text) + "data: [DONE]\n\n"
-        await finalize_answer(ctx, result_text, write_cache=cache_allowed)
-        ctx.saved_normally = True
+        ctx.saved_normally = True  # 先置位再 finalize（C-F11，F2 顺序统一）
         ctx.finished = True
+        await finalize_answer(ctx, result_text, write_cache=cache_allowed)
         logger.info(f"简单任务快速通道完成: agent={agent_name}")
     except Exception as fast_err:
         if is_civil_persona(ctx.persona_id):
             logger.warning(f"民法典快速通道失败，禁止通用知识降级: {fast_err}")
             async for event in _finish_simple_terminal(
                     ctx, grounding_reply("service_error", ctx.req.lang)):
+                yield event
+            return
+        # 已有正文外发时不得换模型重答（10-07 审查 chat P2-1 同族旁路，与 chat_react.
+        # _fallback_and_finalize 同一口径）：重答会把半截与全文拼成矛盾的两段并双扣费
+        if state.get("text"):
+            logger.warning(
+                f"简单任务快速通道中途失败，已外发 {len(state['text'])} 字，收口不重答: {fast_err}")
+            async for event in _finalize_partial_answer(ctx, state["text"]):
                 yield event
             return
         logger.warning(f"简单任务快速通道失败，降级到流式模式: {fast_err}")
@@ -389,18 +408,16 @@ async def recommend_fast_path(ctx: ChatStreamCtx) -> AsyncIterator[str]:
     """推荐/多 Agent：已知意图 → 直接并行执行所有工具 → 单次 LLM 格式化"""
     mark_route("recommend_fast_path")
     logger.info(f"推荐/多Agent快速通道: agents={ctx.matched_agents}")
-    yield sse("thought", '正在查询多个信息，请稍候...')
+    yield sse("thought", thinking_text("recommend_multi", ctx.req))
+    result_text = ""  # 声明在 try 外：except 分支要能读到"已外发了多少"（10-07 chat P2-1 旁路）
     try:
         tool_results: List[Tuple[str, dict]] = []
         async for ev in _run_recommend_tools(ctx, tool_results):
             yield ev
 
         _sys = _fast_system_base(ctx)
-        _fc = await build_file_context(ctx.req, ctx.username)
-        if _fc:
-            _sys += "\n\n" + _fc
-        # 错误结果不进 prompt：模型无法利用错误数据，反而会对着它元推理（把
-        # "为什么是错误数据"的纠结漏进正文）；只点名缺失板块做一句中性说明
+        # 文件上下文不再拼接（F1，2026-09-28，与 simple 通道同修）：ctx.messages[1:] 已承载，重复拼=双倍 token
+        # 错误结果不进 prompt：模型利用不了错误数据只会元推理，缺失板块只点名做一句中性说明
         ok_results = [(n, r) for n, r in tool_results if not (isinstance(r, dict) and r.get("error"))]
         _sys += "\n\n以下是已查询到的实时数据，请整合成一份完整、自然、连贯的回答给用户。不要提及「专家」「查询工具」等词。\n\n"
         for name, res in ok_results:
@@ -414,7 +431,6 @@ async def recommend_fast_path(ctx: ChatStreamCtx) -> AsyncIterator[str]:
             )
         _sys += _ANSWER_DISCIPLINE
 
-        result_text = ""
         _sf = get_filter()
         _content_guard = ContentStreamGuard(_sf)
         _stream_interrupted = False
@@ -426,11 +442,10 @@ async def recommend_fast_path(ctx: ChatStreamCtx) -> AsyncIterator[str]:
                 if not hide_reasoning(ctx.persona_id, ctx.persona) and text:
                     yield sse("reasoning_chunk", text)
             elif kind == "answer":
-                # 跨块缓冲（2026-09-10 审查 P2）：拦被块边界切开的敏感词
-                _piece, _blocked = _content_guard.feed(text)
+                _piece, _blocked = _content_guard.feed(text)  # 跨块缓冲拦被块边界切开的敏感词（09-10 P2）
                 if _blocked:
-                    result_text += _sf.safe_message
-                    yield sse("answer_chunk", _sf.safe_message)
+                    result_text += safety_message(ctx.req, _sf.safe_message)
+                    yield sse("answer_chunk", safety_message(ctx.req, _sf.safe_message))
                     _stream_interrupted = True
                     break
                 if _piece:
@@ -441,8 +456,8 @@ async def recommend_fast_path(ctx: ChatStreamCtx) -> AsyncIterator[str]:
             _tail, _tail_blocked = _content_guard.flush()
             if _tail_blocked:
                 _stream_interrupted = True
-                result_text = _sf.safe_message
-                yield sse("answer_chunk", _sf.safe_message)
+                result_text = safety_message(ctx.req, _sf.safe_message)
+                yield sse("answer_chunk", safety_message(ctx.req, _sf.safe_message))
             elif _tail:
                 _stream_generated = True
                 result_text += _tail
@@ -450,17 +465,22 @@ async def recommend_fast_path(ctx: ChatStreamCtx) -> AsyncIterator[str]:
 
         result_text = await ensure_answer(ctx, result_text,
             f"多Agent快速通道未返回有效回复: agents={ctx.matched_agents}, models={ctx.model_try_list}")
-        _cache_allowed = _stream_generated and not _stream_interrupted
+        _cache_allowed = _stream_generated and not _stream_interrupted  # DFA 拦过的产物不入语义缓存（09-11 P1）
         if _sf.contains_sensitive(result_text):
             _cache_allowed = False
         result_text = apply_safety_filter(result_text)
         yield sse("answer_complete", result_text) + "data: [DONE]\n\n"
 
-        # 同上：DFA 拦截过的产物不入语义缓存（2026-09-11 规则审查 P1）
-        await finalize_answer(ctx, result_text, write_cache=_cache_allowed)
-        ctx.saved_normally = True
+        ctx.saved_normally = True  # 先置位再 finalize（C-F11，F2 顺序统一）
         ctx.finished = True
+        await finalize_answer(ctx, result_text, write_cache=_cache_allowed)
         logger.info(f"多Agent快速通道完成: {len(tool_results)}个工具")
         return
     except Exception as fast_err:
+        if result_text:  # 同 simple 通道：半截正文已外发则不重答，只补完成标记收口
+            logger.warning(
+                f"多Agent快速通道中途失败，已外发 {len(result_text)} 字，收口不重答: {fast_err}")
+            async for event in _finalize_partial_answer(ctx, result_text):
+                yield event
+            return
         logger.warning(f"多Agent快速通道失败，降级到流式模式: {fast_err}")

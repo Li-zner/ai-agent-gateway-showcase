@@ -3,15 +3,10 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import RagOpsChatView from '../src/views/RagOpsChatView.vue'
 import {
-  approveRagAction,
-  cancelRagAction,
-  getRagIncident,
   getRagRequest,
   getRagStatus,
-  listRagChangeSets,
   listRagIncidents,
   listRagRequests,
-  proposeRagChangeSet,
   streamRagOpsAsk,
 } from '../src/api/ragAdmin'
 
@@ -90,7 +85,6 @@ beforeEach(() => {
   vi.mocked(getRagStatus).mockResolvedValue(status)
   vi.mocked(listRagIncidents).mockResolvedValue({ items: [] })
   vi.mocked(listRagRequests).mockResolvedValue({ items: [request] })
-  vi.mocked(listRagChangeSets).mockResolvedValue({ items: [] })
   vi.mocked(getRagRequest).mockResolvedValue({
     ...request,
     content: {
@@ -162,132 +156,6 @@ describe('RagOpsChatView 错误复位', () => {
     } finally {
       vi.useRealTimers()
     }
-  })
-})
-
-describe('RagOpsChatView 变更集审批', () => {
-  const changeSet = {
-    change_set_id: 7,
-    change_type: 'knowledge_add' as const,
-    target_table: 'knowledge_chunks',
-    payload: {
-      items: [{
-        chunk_key: 'civil_c138bd58667673af',
-        source: 'civil_code',
-        heading: '第五百三十三条',
-        content: '情势变更条款的修订表述',
-        article: '第五百三十三条',
-      }],
-    },
-    validation_report: { warnings: ['批内已去重'], db: { warnings: [] } },
-    snapshot: {},
-    status: 'pending_approval' as const,
-    version: 1,
-    created_by: 'ops-a',
-    applied_at: null,
-    rolled_back_at: null,
-    created_at: '2026-09-17T09:00:00',
-    updated_at: '2026-09-17T09:00:00',
-    latest_action_id: 33,
-    latest_action_status: 'waiting_approval',
-  }
-
-  it('待审批变更集展示 diff 预览，批准/驳回走动作审批接口', async () => {
-    vi.mocked(listRagChangeSets).mockResolvedValue({ items: [changeSet] })
-    vi.mocked(approveRagAction).mockResolvedValue({} as never)
-    const wrapper = mount(RagOpsChatView)
-    await flushPromises()
-
-    const card = wrapper.find('.changeset-card')
-    expect(card.exists()).toBe(true)
-    expect(card.text()).toContain('知识补充')
-    expect(card.text()).toContain('第五百三十三条')
-    expect(card.text()).toContain('情势变更条款的修订表述')
-    expect(card.text()).toContain('批内已去重')
-
-    await wrapper.find('.changeset-card .context-actions button').trigger('click')
-    await flushPromises()
-    expect(approveRagAction).toHaveBeenCalledWith(33)
-    wrapper.unmount()
-  })
-
-  it('驳回调用动作取消接口', async () => {
-    vi.mocked(listRagChangeSets).mockResolvedValue({ items: [changeSet] })
-    vi.mocked(cancelRagAction).mockResolvedValue({} as never)
-    const wrapper = mount(RagOpsChatView)
-    await flushPromises()
-
-    const buttons = wrapper.findAll('.changeset-card .context-actions button')
-    await buttons[1].trigger('click')
-    await flushPromises()
-    expect(cancelRagAction).toHaveBeenCalledWith(33)
-    wrapper.unmount()
-  })
-
-  it('无待审批变更集时不渲染面板', async () => {
-    const wrapper = mount(RagOpsChatView)
-    await flushPromises()
-    expect(wrapper.find('.changeset-context').exists()).toBe(false)
-    wrapper.unmount()
-  })
-})
-
-describe('RagOpsChatView 变更集提议', () => {
-  const incident = {
-    incident_id: 5,
-    code: 'RC-1',
-    name: 'RC-1',
-    severity: 'high',
-    status: 'open',
-    title: '召回率下降',
-    summary: '',
-    suspected_cause: '',
-    recommended_action: '',
-    persona: 'civil_code',
-    occurrence_count: 2,
-    affected_requests: 2,
-    first_seen_at: '',
-    last_seen_at: '',
-    resolved_at: null,
-    closed_at: null,
-    owner: null,
-    acknowledged_by: null,
-  }
-
-  it('补充类载荷按 JSON 数组解析并调提议接口', async () => {
-    vi.mocked(listRagIncidents).mockResolvedValue({ items: [incident] })
-    vi.mocked(getRagIncident).mockResolvedValue(incident)
-    vi.mocked(proposeRagChangeSet).mockResolvedValue({} as never)
-    const wrapper = mount(RagOpsChatView)
-    await flushPromises()
-
-    await wrapper.find('.changeset-propose textarea').setValue(
-      '[{"content": "第五百三十四条 新表述", "source": "civil_code"}]')
-    await wrapper.find('.changeset-propose button').trigger('click')
-    await flushPromises()
-
-    expect(proposeRagChangeSet).toHaveBeenCalledWith(
-      5,
-      'knowledge_add',
-      { items: [{ content: '第五百三十四条 新表述', source: 'civil_code' }] },
-      '来自 RAG 运维会话',
-    )
-    wrapper.unmount()
-  })
-
-  it('非法 JSON 不调接口，错误就地展示', async () => {
-    vi.mocked(listRagIncidents).mockResolvedValue({ items: [incident] })
-    vi.mocked(getRagIncident).mockResolvedValue(incident)
-    const wrapper = mount(RagOpsChatView)
-    await flushPromises()
-
-    await wrapper.find('.changeset-propose textarea').setValue('不是JSON')
-    await wrapper.find('.changeset-propose button').trigger('click')
-    await flushPromises()
-
-    expect(proposeRagChangeSet).not.toHaveBeenCalled()
-    expect(wrapper.find('.changeset-propose .changeset-warn').exists()).toBe(true)
-    wrapper.unmount()
   })
 })
 

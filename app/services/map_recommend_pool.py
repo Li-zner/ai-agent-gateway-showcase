@@ -75,14 +75,21 @@ def _sanitize_entries(values) -> list[str]:
     """写前归一：转字符串、去首尾空白、按**字符**截断、批内去重、封顶池上限。
 
     截断放在 Python 而非 Lua：str[:n] 按码点切，多字节中文不会被切坏。
+    2026-09-29 投毒 P1 纵深：命中提示词注入话术（"忽略…指令"族，复用
+    stream_utils 预编译锚）的条目直接丢弃——geocode 校验已把 city 压到
+    真实城市名，这里是第二道：LLM 被城市名内嵌指令诱导产出的条目不落池。
     """
+    from ..core.stream_utils import _INJECTION_PATTERNS
     out: list[str] = []
     for item in values or []:
         if item is None:
             continue  # str(None) 会把字面量 "None" 变成全员可见的"菜名"
         s = str(item).strip()[:RECOMMEND_ENTRY_MAX_CHARS]
-        if s and s not in out:
-            out.append(s)
+        if not s or s in out:
+            continue
+        if any(p.search(s) for p in _INJECTION_PATTERNS):
+            continue  # 注入话术条目不入全员共享池
+        out.append(s)
     return out[:RECOMMEND_POOL_MAX]
 
 

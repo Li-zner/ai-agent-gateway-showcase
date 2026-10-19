@@ -26,6 +26,7 @@ async def _generate_embedding(text: str):
         EMBEDDING_DIMENSIONS,
         EMBEDDING_MODEL,
         EMBEDDING_PROVIDER,
+        EMBEDDING_TIMEOUT,
         QWEN_API_KEY,
         embedding_endpoint_candidates,
     )
@@ -37,7 +38,9 @@ async def _generate_embedding(text: str):
     api_key = EMBEDDING_API_KEY or (QWEN_API_KEY if api_provider else "")
     for url in urls:
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+            # 2026-09-30 校准修复（A3）：5s 硬编码 → 配置化（EMBEDDING_TIMEOUT，
+            # 默认 10s）——ollama 冷启动 10-30s 原先必超时降级
+            async with httpx.AsyncClient(timeout=httpx.Timeout(EMBEDDING_TIMEOUT)) as client:
                 if api_provider:
                     resp = await client.post(
                         url,

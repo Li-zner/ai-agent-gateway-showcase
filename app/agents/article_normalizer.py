@@ -10,9 +10,11 @@ _DIGIT_MAP = {
     '5': '五', '6': '六', '7': '七', '8': '八', '9': '九',
 }
 
-# 中文数字→阿拉伯数字映射
+# 中文数字→阿拉伯数字映射。「两」是口语写法（"两"＝"二"）：条号字符类放开两的同时
+# 这里必须有值，否则 _chinese_to_arabic 把它当分隔符算出 0，会被
+# normalize_article_ref 的 `num <= 0` 分支静默旁路——只改正则等于没改。
 _CN_DIGIT_MAP = {
-    '零': 0, '一': 1, '二': 2, '三': 3, '四': 4,
+    '零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,
     '五': 5, '六': 6, '七': 7, '八': 8, '九': 9,
     '十': 10, '百': 100, '千': 1000,
 }
@@ -98,9 +100,12 @@ def _chinese_to_arabic(text: str) -> int:
 # 正则：匹配"第X条"、"第X条之一"等格式；左分支是范围写法"第X-Y条"（含 -~至到），
 # 右分支是单条。2026-09-18 新增范围分支：此前正则整体不认"第394-404条"，
 # 归一化对范围查询完全旁路，trgm 词面路与 _promote_pinned 条号腿都看不见中文条号。
+# 2026-10-13 字符类补「零」「两」：用户直接写中文"第一千零七十七条"时整条匹配不上，
+# 归一化与条号提取双双旁路。字符类与行首条号那三处同一把尺，由
+# test_article_head_charset_parity_with_retrieval_side 扫描源码钉住。
 _ARTICLE_PATTERN = re.compile(
     r'第(?P<from>\d{1,4})\s*[-~～–—至到]\s*(?P<to>\d{1,4})条'
-    r'|第(?P<num>[一二三四五六七八九十百千0-9]+)条(?:之一|之二|之三|之四)?')
+    r'|第(?P<num>[一二三四五六七八九十百千零两0-9]+)条(?:之一|之二|之三|之四)?')
 
 # 范围展开上限：超过则不改写。逐条展开会等比拉长检索文本（trgm 查询与向量
 # embedding 输入共用），几十上百条时词面稀释已超过点名收益。
@@ -112,6 +117,10 @@ _OTHER_LAW_NAMES = (
     "行政处罚法", "治安管理处罚法", "公司法", "商标法", "专利法", "著作权法",
     "环境保护法", "税收征收管理法", "道路交通安全法", "保险法", "个人所得税法",
 )
+
+# 法律名与「第X条」之间可能夹的标点/空白：书名号、引号、全半角空格、制表符。
+# 判"某法律名是否紧挨在条号前面"时先剥掉它们，否则《》一夹就断（2026-10-07 P1-2）。
+_LAW_NAME_SEPARATORS = "《》「」『』“”\"'’ ‘ \t\r\n　"
 
 
 def normalize_article_ref(query: str) -> str:
@@ -130,15 +139,22 @@ def normalize_article_ref(query: str) -> str:
         归一化后的文本（未匹配则返回原文）
     """
     def _other_law_ahead(start: int) -> bool:
-        """引用前紧挨着其它法律名 → 那是那部法律的条文，整体不改写（否则会拼出"消保法民法典第X条"）"""
-        return any(start >= len(p) and query[start - len(p):start] == p
-                   for p in _OTHER_LAW_NAMES)
+        """引用前紧挨着其它法律名 → 那是那部法律的条文，整体不改写（否则会拼出"消保法民法典第X条"）
+
+        剥尾部书名号/空白再判（2026-10-07 C1/P1-2）：写「《消费者权益保护法》第四十九条」时
+        法律名与条号之间夹着 》，旧写法要求零间隔相等，他法保护整个失效。
+        """
+        prev = query[:start].rstrip(_LAW_NAME_SEPARATORS)
+        return any(prev.endswith(p) for p in _OTHER_LAW_NAMES)
 
     def _head(start: int) -> str:
-        """该引用是否需注入「民法典」前缀（原文已带民法/民法典前缀则不注入）"""
-        if start >= 3 and query[start - 3:start] == "民法典":
-            return ""
-        if start >= 2 and query[start - 2:start] == "民法":
+        """该引用是否需注入「民法典」前缀（原文已带民法/民法典前缀则不注入）
+
+        与 _other_law_ahead 同一个剥壳口径（2026-10-07 C1/P1-2）：「《民法典》第366条」
+        的前缀隔着 》，旧写法逐字相等判定失效，会在书名号内再拼一个「民法典」。
+        """
+        prev = query[:start].rstrip(_LAW_NAME_SEPARATORS)
+        if prev.endswith("民法典") or prev.endswith("民法"):
             return ""
         return "民法典"
 

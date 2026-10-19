@@ -311,7 +311,10 @@ async function goToCity(): Promise<void> {
     // 2026-09-12 清欠（D-F12）：流式期间切人格被拒时不再静默，autoPrompt 不落错人格
     loadError.value = t('map_switch_busy')
   }
-  const loc = userLocation.value ?? (await locate(false)) ?? (await locateByIp())
+  // 进页面时 onMounted 已 locate 过一次并写入 userLocation；这里只即时读内存值。
+  // 不再 await 定位链——GPS 最长 8s + regeo/IP 网络往返会把跳页整段堵住（GO 卡顿根因）。
+  // 取不到就 from=''，travel_without_from 已覆盖无出发地的情况。
+  const loc = userLocation.value
   const from = loc?.city ?? ''
   const prompt = from && from !== city
     ? t('travel_with_from', { from, to: city })

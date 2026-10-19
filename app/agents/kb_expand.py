@@ -56,16 +56,17 @@ _NEIGHBOR_LOCK = threading.Lock()
 _NEIGHBOR_INDEX: dict[int, str] | None = None  # 条号 → chunk_key（进程级缓存）
 
 
-def _permission_clause(permissions: list | None) -> str:
+def _permission_clause(permissions: list | None, param_index: int = 2) -> str:
     """扩召权限过滤片段；语义与 tools._perm_clause 保持一致。
 
     本模块不能反向导入 tools.py（tools 已导入本模块），因此保留同款片段。
-    两个扩召查询的权限参数固定为 $2。
+    邻接查询权限参数固定 $2（默认）；章扩召因新增 embedding_model 占 $2，
+    权限顺延 $3。
     """
     if permissions is None:
         return ""
     if permissions:
-        return " AND (COALESCE(permission, '{}') = '{}' OR permission && $2) "
+        return f" AND (COALESCE(permission, '{{}}') = '{{}}' OR permission && ${param_index}) "
     return " AND COALESCE(permission, '{}') = '{}' "
 
 
@@ -189,14 +190,19 @@ async def _expand_chapter(conn, merged: list, query_embedding: list | None,
         return merged
     if not merged[0].get("heading"):
         return merged
-    args = [merged[0]["heading"]]
+    # embedding_model 过滤（2026-09-28 kb 链审查 KB-R1）：向量召回路一直带
+    # `AND embedding_model = $N` 防跨模型空间比余弦，本章扩召漏了同一道闸——
+    # 库内新旧模型块并存（换 embedding 模型的过渡期）时，与异模型块的余弦
+    # 是跨向量空间的噪声分，择优入池的全是垃圾。
+    from ..core.config import EMBEDDING_MODEL
+    args = [merged[0]["heading"], EMBEDDING_MODEL]
     if permissions:
         args.append(permissions)
     rows = await conn.fetch(
         "SELECT chunk_key, heading, content, embedding FROM knowledge_chunks "
         "WHERE source = 'civil_code' AND valid AND heading = $1 "
-        "AND embedding IS NOT NULL"
-        + _permission_clause(permissions), *args)
+        "AND embedding IS NOT NULL AND embedding_model = $2 "
+        + _permission_clause(permissions, 3), *args)
     in_pool = {c["chunk_key"] for c in merged}
     q = query_embedding
     scored = []

@@ -7,7 +7,7 @@ from typing import List, Dict
 from ..core.redis import get_redis
 from ..core.db import get_pool
 from ..core.logging import setup_logging
-from ..core.config import HISTORY_LIMIT, HISTORY_TTL, HISTORY_SUMMARY_TTL
+from ..core.config import HISTORY_LIMIT, HISTORY_TTL, HISTORY_SUMMARY_TTL, DB_ACQUIRE_TIMEOUT
 from ..core.concurrency import spawn
 from ..agents.memory import generate_summary
 from ..services.conversation_profiles import (
@@ -75,9 +75,11 @@ PENDING_TRAVEL_TS_KEY = "saved_at"
 class MemoryManager:
     """冷热分层记忆管理器（连接池版）"""
 
-    def __init__(self, user_id: str, conv_id: str):
+    def __init__(self, user_id: str, conv_id: str, persona_id: str = ""):
         self.user_id = user_id
         self.conv_id = conv_id
+        # 批1 B-P1-3：画像写入口要按人格排除评测流量，故 persona 必须传到本对象
+        self.persona_id = persona_id
         # Redis 键含 user_id（2026-09-09 审查 P0 IDOR 修复）：键只含 conv_id 时，
         # 知道他人会话 ID 即可读其历史（注入 LLM 上下文）、写其热缓存（跨用户提示注入）；
         # PG 回源本就按 user_id 过滤，热缓存同口径对齐（旧键随 TTL 自然过期）
@@ -188,10 +190,14 @@ return 1
 
     async def _fetch_from_pg(self, limit: int, offset: int = 0) -> List[Dict]:
         pool = await get_pool()
-        async with pool.acquire(timeout=5) as conn:
+        async with pool.acquire(timeout=DB_ACQUIRE_TIMEOUT) as conn:
+            # A-R1（2026-09-29 对齐）：排除 role='system' 压缩摘要行——db_maintenance
+            # 把 30 天前对话的全量 full_text 归档进该行（写侧 DELETE 同口径排除），
+            # 不过滤的话 Redis L1 过期回源时几 MB 归档 JSON 整段进 prompt。
+            # system 行只有压缩摘要一种来源（滚动摘要在 Redis 不经 PG），过滤安全。
             rows = await conn.fetch(
                 "SELECT role, content FROM conversation_memories "
-                "WHERE user_id = $1 AND conversation_id = $2 "
+                "WHERE user_id = $1 AND conversation_id = $2 AND role != 'system' "
                 "ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4",
                 self.user_id, self.conv_id, limit, offset
             )
@@ -253,55 +259,66 @@ return 1
             )
             if overflow:
                 spawn(
-                    self._compress_and_trim(overflow),
+                    self._compress_and_trim(),
                     name=f"compress:{self.conv_id}",
                 )
         except Exception as e:
             logger.warning(f"对话历史条数裁剪失败: {e}")
 
-    async def _compress_and_trim(self, overflow_msgs: list) -> None:
-        """生成摘要成功后，按原 overflow 前缀条件裁剪热历史。"""
-        compressed = await self._compress_overflow(overflow_msgs)
-        if not compressed:
-            return
-        redis = await get_redis()
-        await redis.eval(
-            self._TRIM_VERIFIED_LUA,
-            1, self._history_key, *overflow_msgs,
-        )
+    async def _compress_and_trim(self) -> None:
+        """会话锁内「重读溢出 → 生成摘要 → 验证式裁剪」串行完成。
 
-    async def _compress_overflow(self, overflow_msgs) -> bool:
-        """滚动摘要：旧摘要 + 本次溢出 → LLM 重新生成摘要（失败不阻塞主流程）。
-
-        按会话加锁串行：并发压缩各自基于同一旧摘要生成会互相覆盖（后写者丢前者的
-        溢出内容）；排队等锁后重读最新摘要再合并，两批溢出都不丢。
+        2026-10-06 债转修：溢出快照不再由 _trim_and_compress 带入（拿快照到
+        真正执行之间可能已被并发批次裁掉前缀），改为锁内重读——否则后写批次的
+        摘要会并入已裁消息、其裁剪又被 TRIM 验证拒绝，摘要与热历史对同一批
+        消息重叠。多实例间仍是 ponytail 既定的 last-writer-wins 上限。
         """
         lock = _get_summary_lock(self._summary_key)
         acquired = False
         try:
             await lock.lock.acquire()
             acquired = True
-            try:
-                redis = await get_redis()
-                old = await redis.get(self._summary_key)
-                old_text = old.decode() if isinstance(old, bytes) else (old or "")
-                combined = []
-                if old_text and old_text.strip():
-                    combined.append({"role": "system", "content": f"此前摘要：{old_text}"})
-                combined.extend(json.loads(m) for m in overflow_msgs)
-                new_summary = await generate_summary(combined, username=self.user_id)
-                if new_summary and new_summary.strip():
-                    await redis.set(self._summary_key, new_summary, ex=HISTORY_SUMMARY_TTL)
-                    return True
-                return False
-            except Exception as e:
-                logger.warning(f"生成滚动摘要失败（不影响主流程）: {e}")
-                return False
+            redis = await get_redis()
+            total = await redis.llen(self._history_key)
+            if total <= HISTORY_LIMIT:
+                return
+            overflow = await redis.lrange(
+                self._history_key, 0, total - HISTORY_LIMIT - 1
+            )
+            if not overflow:
+                return
+            if not await self._compress_overflow(overflow):
+                return
+            await redis.eval(
+                self._TRIM_VERIFIED_LUA,
+                1, self._history_key, *overflow,
+            )
+        except Exception as e:
+            logger.warning(f"滚动压缩/裁剪失败（不影响主流程，下轮重试）: {e}")
         finally:
             if acquired:
                 lock.lock.release()
             # 等待锁期间被取消也必须归还引用计数，避免锁字典永久泄漏。
             _release_summary_lock(self._summary_key, lock)
+
+    async def _compress_overflow(self, overflow_msgs) -> bool:
+        """滚动摘要：旧摘要 + 本次溢出 → LLM 重新生成摘要并写回。
+
+        仅供 _compress_and_trim 在已持会话锁时调用（锁语义 2026-10-06 上移）；
+        失败返回 False，调用方据此跳过裁剪（摘要成功前不裁剪热历史）。
+        """
+        redis = await get_redis()
+        old = await redis.get(self._summary_key)
+        old_text = old.decode() if isinstance(old, bytes) else (old or "")
+        combined = []
+        if old_text and old_text.strip():
+            combined.append({"role": "system", "content": f"此前摘要：{old_text}"})
+        combined.extend(json.loads(m) for m in overflow_msgs)
+        new_summary = await generate_summary(combined, username=self.user_id)
+        if new_summary and new_summary.strip():
+            await redis.set(self._summary_key, new_summary, ex=HISTORY_SUMMARY_TTL)
+            return True
+        return False
 
     async def _save_to_pg(self, user_msg: Dict, assistant_msg: Dict):
         """异步写入 PostgreSQL（带限流与错误处理）。
@@ -314,13 +331,14 @@ return 1
         """
         async with _PG_WRITE_SEMAPHORE:  # 限流：最多 12 个并发写入（见定义处，P1 #42）
             pool = await get_pool()
+            # 2026-09-30 校准修复（B1）：5s 硬编码 → DB_ACQUIRE_TIMEOUT
             last_err = None
             committed = False
             user_uid = uuid.uuid4().hex
             assistant_uid = uuid.uuid4().hex
             for attempt in range(3):
                 try:
-                    async with pool.acquire(timeout=5) as conn:
+                    async with pool.acquire(timeout=DB_ACQUIRE_TIMEOUT) as conn:
                         async with conn.transaction():
                             await conn.execute(
                                 "INSERT INTO conversation_memories "
@@ -352,7 +370,7 @@ return 1
                 logger.warning(f"PG 写入失败（重试 3 次后放弃，本轮长期记忆可能丢失）: {last_err}")
                 return
             # 画像更新独立于记忆写入重试：画像失败不得触发整批消息再次 INSERT。
-            async with pool.acquire(timeout=5) as conn:
+            async with pool.acquire(timeout=DB_ACQUIRE_TIMEOUT) as conn:
                 try:
                     await self._update_profile_async(
                         conn, user_msg["content"], assistant_msg["content"]
@@ -387,20 +405,38 @@ return 1
 
     async def update_profile_fields(self, updates: dict) -> None:
         """供旅行槽位流程写明确的出发地/目的地，不依赖文本猜测。"""
-        if not updates:
+        if not updates or self._is_eval_traffic():
             return
         pool = await get_pool()
-        async with pool.acquire(timeout=5) as conn:
+        async with pool.acquire(timeout=DB_ACQUIRE_TIMEOUT) as conn:
             await self._upsert_conversation_profile(conn, updates)
 
     async def get_conversation_profile(self) -> dict:
         """读取结构化会话画像，供路由恢复目的地、出发地和其他槽位。"""
         pool = await get_pool()
-        async with pool.acquire(timeout=5) as conn:
+        async with pool.acquire(timeout=DB_ACQUIRE_TIMEOUT) as conn:
             return await load_conversation_profile(conn, self.user_id, self.conv_id)
+
+    def _is_eval_traffic(self) -> bool:
+        """批1 B-P1-3：评测流量（persona=civil_code_eval）不进画像口径。
+
+        184 条民法典批量评测是打真实 chat 端点跑的，每一轮都会经
+        `finalize_answer → save_messages → _update_profile_async` 写进
+        `conversation_profiles`/`user_profiles` 并把 `message_count` 加一格，
+        真实用户的画像与消息数被合成样本污染。trace/verdict 侧早有排除口径
+        （`rag_monitor.py` 按 persona 反选），画像侧此前漏了。
+        判据必须是 `is_eval_persona`（只排评测）；用 `is_civil_persona` 会连
+        线上民法典真实用户一起关掉。记忆本体（会话历史）不排除——评测要复现
+        真实链路的多轮行为。
+        """
+        from .persona_manager import is_eval_persona
+
+        return is_eval_persona(self.persona_id)
 
     async def _update_profile_async(self, conn, user_content: str, assistant_content: str):
         """从用户问题提取会话画像，并保留全局画像作为跨会话偏好。"""
+        if self._is_eval_traffic():
+            return
         new_profile = extract_profile_updates(user_content)
         await self._upsert_conversation_profile(
             conn, new_profile, increment_message_count=True,
@@ -434,7 +470,9 @@ return 1
         data = normalize_conversation_profile(profile_data)
         parts = []
         labels = {
-            "name": "姓名", "travelers": "人数", "origin": "出发地",
+            # 批1 B-P1-4（2026-09-28）：不回填姓名。抽取端已停写，但存量画像里仍有
+            # name 字段，这里不列它就等于"忽略"；库里的字段与列一律不动。
+            "travelers": "人数", "origin": "出发地",
             "destination": "目的地", "budget": "预算", "days": "行程",
         }
         for field, label in labels.items():
@@ -456,7 +494,7 @@ return 1
     async def get_profile(self) -> str:
         """优先读取本会话画像，再回退跨会话全局画像。"""
         pool = await get_pool()
-        async with pool.acquire(timeout=5) as conn:
+        async with pool.acquire(timeout=DB_ACQUIRE_TIMEOUT) as conn:
             row = await conn.fetchrow(
                 "SELECT profile FROM conversation_profiles "
                 "WHERE user_id = $1 AND conversation_id = $2",

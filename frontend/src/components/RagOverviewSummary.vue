@@ -1,5 +1,7 @@
 <script setup lang="ts">
 /** RAG 概览摘要：优先展示待处理告警，再展示评测和容量指标。 */
+import { onMounted, ref } from 'vue'
+import { listRagEvaluations } from '../api/ragAdmin'
 import type { RagStatus } from '../api/ragAdmin'
 import { fmtAgo, fmtDuration } from '../utils/ragFormat'
 import RagEvaluationPanel from './RagEvaluationPanel.vue'
@@ -8,6 +10,23 @@ const props = defineProps<{
   status: RagStatus
   activeIncidentCount: number
 }>()
+
+// DB Agent 黄金评测夜跑通过率（#6）：读 reports 里最新的 dbagent-golden-*
+const goldenNote = ref('')
+const goldenMeta = ref('')
+
+onMounted(async () => {
+  try {
+    const { items } = await listRagEvaluations()
+    const latest = items.find((item) => item.report.startsWith('dbagent-golden-'))
+    if (latest) {
+      goldenNote.value = latest.summary.note || ''
+      goldenMeta.value = `${latest.report.replace('dbagent-golden-', '').replace('.json', '')} · ${latest.summary.evaluated} 例`
+    }
+  } catch {
+    /* 概览不因评测列表失败而挂 */
+  }
+})
 </script>
 
 <template>
@@ -34,13 +53,16 @@ const props = defineProps<{
         <strong>{{ fmtDuration(props.status.requests_24h.p95_latency_ms) }}</strong>
       </article>
     </div>
+
+    <!-- DB Agent 黄金评测夜跑（#6）：有报告才显示 -->
+    <div v-if="goldenNote" class="golden-note">
+      <span class="golden-label">DB Agent 评测</span>
+      <span>{{ goldenNote }}</span>
+      <span class="golden-meta">{{ goldenMeta }} · 明细见「测评」</span>
+    </div>
   </section>
 
-  <RagEvaluationPanel
-    v-if="props.status.evaluation"
-    :evaluation="props.status.evaluation"
-    :runtime="props.status.runtime_config"
-  />
+  <RagEvaluationPanel :runtime="props.status.runtime_config" />
 
   <section class="capacity-panel">
     <div class="panel-head">
@@ -101,6 +123,21 @@ h2 { margin: 0; font-size: 14px; }
 .alert-card.active { border-left-color: #d92d20; background: #fffbfa; }
 .alert-card span { display: block; color: var(--text-muted, #6b7280); font-size: 12px; }
 .alert-card strong { display: block; margin-top: 5px; font-size: 23px; }
+
+/* DB Agent 夜跑通过率条 */
+.golden-note {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-color, #d5dae3);
+  border-left: 4px solid #3d7a5c;
+  border-radius: 8px;
+  background: var(--bg-card, #fff);
+  font-size: 13px;
+}
+.golden-label { font-weight: 700; color: #3d7a5c; flex: none; }
+.golden-meta { margin-left: auto; color: var(--text-muted, #6b7280); font-size: 12px; flex: none; }
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));

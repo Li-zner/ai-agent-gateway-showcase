@@ -23,8 +23,8 @@ import {
 } from '../api/ragAdmin'
 import { ApiError } from '../api/http'
 import RagActionWorkspace from '../components/RagActionWorkspace.vue'
-import RagDataAskPanel from '../components/RagDataAskPanel.vue'
 import RagEvalPanel from '../components/RagEvalPanel.vue'
+import RagPermsPanel from '../components/RagPermsPanel.vue'
 import RagIncidentDetail from '../components/RagIncidentDetail.vue'
 import RagOverviewSummary from '../components/RagOverviewSummary.vue'
 import RagRequestDetail from '../components/RagRequestDetail.vue'
@@ -40,7 +40,9 @@ import {
   label_status,
 } from '../utils/ragLabels'
 
-type TabKey = 'overview' | 'requests' | 'incidents' | 'actions' | 'eval' | 'data'
+type TabKey = 'overview' | 'requests' | 'incidents' | 'actions' | 'eval' | 'perms'
+// 2026-10-03：子导航收敛——问数迁运维会话顶栏，Agent 对话台入口由顶栏承担；
+// 新增「权限」= 子账号能力管理（业主 #2）
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -324,7 +326,7 @@ onUnmounted(() => {
         <button :class="tabClass('incidents')" @click="activeTab = 'incidents'">事件 {{ activeIncidentCount }}</button>
         <button :class="tabClass('actions')" @click="activeTab = 'actions'">动作 {{ pendingActionCount }}</button>
         <button :class="tabClass('eval')" @click="activeTab = 'eval'">测评</button>
-        <button :class="tabClass('data')" @click="activeTab = 'data'">问数</button>
+        <button :class="tabClass('perms')" @click="activeTab = 'perms'">权限</button>
       </nav>
 
       <!-- 写操作失败横幅（P2-3）：放在 tabs 之后，失败只提示不吞掉整个分区表格。 -->
@@ -442,8 +444,8 @@ onUnmounted(() => {
         <RagEvalPanel />
       </section>
 
-      <section v-else class="eval-workspace" aria-label="只读问数">
-        <RagDataAskPanel />
+      <section v-else class="eval-workspace" aria-label="子账号能力管理">
+        <RagPermsPanel />
       </section>
     </template>
   </main>
@@ -451,9 +453,14 @@ onUnmounted(() => {
 
 <style scoped>
 .rag-console {
-  min-height: 100vh;
-  /* 顶部导航栏固定高 48px：正文整体下移（48 + 20 间距），避免被固定栏遮挡 */
-  padding: 68px 20px 20px;
+  /* 2026-10-02 修复导航遮蔽：导航 fixed 在顶部 48px，本容器作为独立滚动区
+     从 68px 起步（48 + 20 间距）——滚动发生在容器内部，内容顶部永远不会
+     滚进导航栏区域（旧版整页滚动时卡片会从 fixed 导航底下穿过被切掉上半） */
+  margin-top: 68px;
+  height: calc(100vh - 68px);
+  height: calc(100dvh - 68px);
+  overflow-y: auto;
+  padding: 0 20px 20px;
   background: var(--bg-body, #f5f7fa);
   color: var(--text-primary, #1f2937);
 }

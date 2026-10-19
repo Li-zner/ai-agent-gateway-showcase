@@ -129,6 +129,31 @@ describe('chat store', () => {
     expect(chat.currentSession?.messages.map((m) => m.content)).toEqual(['原问题', '新回答'])
   })
 
+  it('已在新会话（无消息）时重复新建不再产生空会话', () => {
+    const chat = useChatStore()
+
+    chat.newConversation() // 首次：当前为空 → 建一个空会话
+    expect(chat.sessions).toHaveLength(1)
+    const firstId = chat.currentSessionId
+
+    chat.newConversation() // 已在新会话 → 维持现状，不再建
+    expect(chat.sessions).toHaveLength(1)
+    expect(chat.currentSessionId).toBe(firstId)
+  })
+
+  it('当前会话已有消息时新建会另开一个新会话', () => {
+    const chat = useChatStore()
+    const session = makeSession('s1', 'c1')
+    session.messages = [{ id: 'u1', role: 'user', content: '你好' }]
+    chat.sessions = [session]
+    chat.currentSessionId = 's1'
+
+    chat.newConversation()
+
+    expect(chat.sessions).toHaveLength(2)
+    expect(chat.currentSessionId).not.toBe('s1')
+  })
+
   it('删除问答后切换服务端分支，旧上下文不再复用', () => {
     const chat = useChatStore()
     const session = makeSession('s1', 'c-old')

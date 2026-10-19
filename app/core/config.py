@@ -28,12 +28,20 @@ class _Settings(BaseSettings):
 
     # ---------- 安全过滤 / 地点提取 ----------
     safe_filter_message: str = "该问题涉及敏感信息，小助手不便回答哦~"
+    # 答案级本地化：界面语言为 en 时吐出这条英文安全提示（中文保持默认值不变）。
+    safe_filter_message_en: str = "This question involves sensitive information, so the assistant can't answer it."
     safe_filter_words_file: str = ""
     default_city: str = "梧州"
 
     # ---------- 高德地图 ----------
     # 天气/IP 定位/地理编码共用 Key（原 map_api 四处裸 os.getenv，2026-09-10 审查收编）
     amap_api_key: str = ""
+
+    # ---------- Cloudflare Turnstile（A-P1-4：匿名发码人机校验） ----------
+    # site_key 公开（前端渲染挂件）、secret 服务端校验；**两者留空 = 功能关闭**，
+    # 本地开发与未配置部署完全不受影响（2026-09-29 接入，缺省安全）
+    turnstile_site_key: str = ""
+    turnstile_secret: str = ""
 
     # ---------- 可观测性 ----------
     # Prometheus /metrics 与 /test-otel 的 Bearer 门禁（原 observability 裸
@@ -60,6 +68,22 @@ class _Settings(BaseSettings):
     # 中控台「问数」只读观测专用 DSN（账号见 scripts/rag_readonly_role.sql）。
     # 不回退 database_url：只读观测一旦被赋予主账号，SQL 守卫就是纸糊的。
     rag_readonly_dsn: str = ""
+    # 中控台「DB Agent」双通道 DSN（dbagent_readonly / dbagent_writer 角色，
+    # 建号脚本见 DBagent 项目 scripts/readonly_role.sql）。同样不回退主账号。
+    dbagent_readonly_dsn: str = ""
+    dbagent_write_dsn: str = ""
+    # DB Agent 影子期开关（env DBAGENT_PROPOSE_ONLY=1）：写门批准后不执行，
+    # 只把 SQL+参数 登记改动日志（action='proposed'）交人工执行。
+    # 单任务可用提交体的 propose_only 覆盖（评测/演练用）。
+    dbagent_propose_only: bool = False
+    # DB Agent 并发任务上限（跨实例按 PG 活跃行数计，P2-1 配置化）：
+    # 多实例部署时各副本必须配同值——闸在库里数的是全集群活跃任务。
+    dbagent_max_active: int = 3
+    # 每提交者并发任务上限（P2-3）：防单人占满全局槽；同款跨实例口径
+    dbagent_per_user_active: int = 2
+    # 单任务 token 预算（P2-3，input+output 累计）：超限转 failed 留痕。
+    # 实测最重任务（分节分析）约 44k，400k≈10 倍余量——只拦失控循环
+    dbagent_task_token_budget: int = 400000
     timeout_seconds: float = 30.0
 
     # ---------- GitHub OAuth ----------
@@ -74,18 +98,32 @@ class _Settings(BaseSettings):
     refresh_token_expire_days: int = 30
     refresh_max_days: int = 30
 
-    # ---------- LLM 主备（deepseek_model 是主力槽位，qwen 系时自动路由百炼）----------
+    # ---------- LLM 槽位（2026-10-08 待拍板4：按角色命名，不再绑供应商名）----------
+    # primary=主力（qwen 系自动路由百炼端点）、fallback=降级（DeepSeek 官方 flash 档）、
+    # last_resort=DB Agent 末级兜底。环境变量同名（LLM_PRIMARY_MODEL / LLM_FALLBACK_MODEL /
+    # LLM_LAST_RESORT_MODEL）；旧键 DEEPSEEK_MODEL / DEEPSEEK_FLASH_MODEL 已废弃——
+    # 主力一直是 qwen3.7-flash，键名绑 deepseek 会误导，.env 需同步改键名。
     deepseek_api_base: str = "https://api.deepseek.com"
     deepseek_api_timeout: float = 30.0
-    deepseek_model: str = "qwen3.7-flash"
-    deepseek_flash_model: str = "deepseek-flash"
-    deepseek_fallback_message: str = "服务器繁忙，请稍后再提问吧！"
-    # DB Agent 模型档位与连接池 DSN（与私有主仓同名同默认值；真实凭据只走 .env/环境变量）
     llm_primary_model: str = "qwen3.7-flash"
     llm_fallback_model: str = "deepseek-flash"
+    # DB Agent 跨供应商兜底（P1-1）：主通道（flash+主模型）两轮全挂后点名的
+    # 最后一级。与主模型同属百炼——百炼整体宕机时三级全挂（ponytail 天花板，
+    # 升级 = 兜底换 DeepSeek 官方非 flash 档模型）。
+    # 10-08 主人规则「谁便宜用谁」：官方价目（华北2 原价，输入/输出 元每百万 token）
+    # qwen3.7-flash 0.2/0.8、qwen3.8-flash 0.8/2.7，末级换成 3.7 后阶梯末两级同名，
+    # 语义变成「同端点重试两轮」；跨供应商冗余不变（3.8 与 3.7 本来就同属百炼）。
     llm_last_resort_model: str = "qwen3.7-flash"
-    dbagent_readonly_dsn: str = ""
-    dbagent_write_dsn: str = ""
+    deepseek_fallback_message: str = "服务器繁忙，请稍后再提问吧！"
+    # 答案级本地化：界面语言为 en 时这条兜底也走英文（与 safe_filter_message_en 同口径）。
+    deepseek_fallback_message_en: str = "The server is busy, please try again later."
+    # 其余答案级中文兜底/标记，同样配中英两版（A 方案全量本地化的补齐档）。
+    empty_answer_message: str = "抱歉，我暂时无法回答。"
+    empty_answer_message_en: str = "Sorry, I can't answer this right now."
+    incomplete_answer_message: str = "抱歉，我暂时无法完成完整的回答。"
+    incomplete_answer_message_en: str = "Sorry, I couldn't finish a complete answer."
+    content_filtered_note: str = "[内容已过滤]"
+    content_filtered_note_en: str = "[content filtered]"
     llm_enable_thinking: bool = False
 
     # ---------- Qwen（阿里云百炼 OpenAI 兼容端点；主力模型为 qwen 系时使用）----------
@@ -95,15 +133,30 @@ class _Settings(BaseSettings):
     llm_temperature: float = 0.3
 
     # ---------- 对话管理 ----------
-    # 保留15轮原始消息，第16次用户提问后再滚动摘要压缩。
+    # summary_threshold 是历史读取上限（get_context(limit=…)），不是压缩阈值：
+    # 压缩在 20 条处折叠（runner max_messages=20 / chat_stream_ctx 兜底 20，
+    # 2026-09-22 拍板），读取留 10 条余量。旧注释"保留15轮"口径已废（09-30 对齐，
+    # 生效值以 /api/admin/rag/effective-config 为准）。
     summary_threshold: int = 30
     history_limit: int = 30
     history_ttl: int = 86400
     history_summary_ttl: int = 604800
     rag_answer_top_k: int = 10
 
+    # ---------- 能力开关（2026-09-30"建了不闭环"治理） ----------
+    # LLM 二级意图分类与多 Agent 交叉审阅此前"实现了但调用点写死关"——现挂环境
+    # 变量（INTENT_USE_LLM / ORCH_ENABLE_PHASE2），默认关、行为与历史等价，
+    # 可被真实触发；生效值随 /api/admin/rag/effective-config 报出。
+    intent_use_llm: bool = False
+    orch_enable_phase2: bool = False
+
     # ---------- 超时 ----------
-    tool_timeout: float = 30.0
+    # 2026-09-30 校准修复（逻辑审阅 A2）：单次子 Agent 调用最坏 = 主模型 15s +
+    # flash 兜底 15s（post_chat_completion 模型级轮换，已核无 Key 级放大），
+    # 30s 帽子刚好卡在掐掉合法最坏的位置。45s 的余量给兜底模型跑完
+    # （主人拍板"45s 在兜底模型加时长"）；带 prompt 修复的整体重试（~60s）
+    # 仍会被掐，接受——重试被掐 = 降级为工具错误，可容忍。
+    tool_timeout: float = 45.0
     http_timeout_short: float = 5.0
     http_timeout_medium: float = 15.0
     http_timeout_long: float = 30.0
@@ -120,6 +173,10 @@ class _Settings(BaseSettings):
     embedding_model: str = "shaw/dmeta-embedding-zh"
     embedding_provider: str = "ollama"
     embedding_dimensions: int = 768
+    # 2026-09-30 校准修复（逻辑审阅 A3）：原 kb_embedding 硬编码 5s 总超时，
+    # ollama 冷启动 10-30s 首嵌必超时降级，且独立于 http_timeout_* 族调不动。
+    # 10s 覆盖温启动；冷启动由运维先 warm。
+    embedding_timeout: float = 10.0
     cache_similarity_threshold: float = 0.85
     cache_l0_ttl: int = 600
 
@@ -201,6 +258,12 @@ if "*" in CORS_ORIGINS:
 POSTGRES_DSN = _settings.database_url
 DATABASE_URL = POSTGRES_DSN  # MemoryManager 使用的别名
 RAG_READONLY_DSN = _settings.rag_readonly_dsn
+DBAGENT_READONLY_DSN = _settings.dbagent_readonly_dsn
+DBAGENT_WRITE_DSN = _settings.dbagent_write_dsn
+DBAGENT_PROPOSE_ONLY = _settings.dbagent_propose_only
+DBAGENT_MAX_ACTIVE = _settings.dbagent_max_active
+DBAGENT_PER_USER_ACTIVE = _settings.dbagent_per_user_active
+DBAGENT_TASK_TOKEN_BUDGET = _settings.dbagent_task_token_budget
 TIMEOUT_SECONDS = _settings.timeout_seconds
 
 GITHUB_CLIENT_ID = _settings.github_client_id
@@ -217,14 +280,17 @@ REFRESH_MAX_DAYS = _settings.refresh_max_days
 
 DEEPSEEK_API_BASE = _settings.deepseek_api_base
 DEEPSEEK_API_TIMEOUT = _settings.deepseek_api_timeout
-DEEPSEEK_MODEL = _settings.deepseek_model
-DEEPSEEK_FLASH_MODEL = _settings.deepseek_flash_model
-DEEPSEEK_FALLBACK_MESSAGE = _settings.deepseek_fallback_message
-DBAGENT_READONLY_DSN = _settings.dbagent_readonly_dsn
-DBAGENT_WRITE_DSN = _settings.dbagent_write_dsn
 LLM_PRIMARY_MODEL = _settings.llm_primary_model
 LLM_FALLBACK_MODEL = _settings.llm_fallback_model
 LLM_LAST_RESORT_MODEL = _settings.llm_last_resort_model
+DEEPSEEK_FALLBACK_MESSAGE = _settings.deepseek_fallback_message
+DEEPSEEK_FALLBACK_MESSAGE_EN = _settings.deepseek_fallback_message_en
+EMPTY_ANSWER_MESSAGE = _settings.empty_answer_message
+EMPTY_ANSWER_MESSAGE_EN = _settings.empty_answer_message_en
+INCOMPLETE_ANSWER_MESSAGE = _settings.incomplete_answer_message
+INCOMPLETE_ANSWER_MESSAGE_EN = _settings.incomplete_answer_message_en
+CONTENT_FILTERED_NOTE = _settings.content_filtered_note
+CONTENT_FILTERED_NOTE_EN = _settings.content_filtered_note_en
 LLM_ENABLE_THINKING = _settings.llm_enable_thinking
 RERANK_SIM_THRESHOLD = _settings.rerank_sim_threshold
 LLM_TEMPERATURE = _settings.llm_temperature
@@ -268,7 +334,16 @@ HTTP_TIMEOUT_MEDIUM = _settings.http_timeout_medium
 HTTP_TIMEOUT_LONG = _settings.http_timeout_long
 MAP_API_TIMEOUT = _settings.map_api_timeout
 AMAP_API_KEY = _settings.amap_api_key
+TURNSTILE_SITE_KEY = _settings.turnstile_site_key
+TURNSTILE_SECRET = _settings.turnstile_secret
 SAFETY_FILTER_MESSAGE = _settings.safe_filter_message
+SAFETY_FILTER_MESSAGE_EN = _settings.safe_filter_message_en
+# 答案级兜底/安全文案的「全语言集合」：语义缓存守门按成员判定而非相等，
+# 否则英文请求吐出的兜底不会等于中文常量、被当正常答案钉进缓存（缓存污染）。
+SAFETY_MESSAGE_VARIANTS = frozenset({SAFETY_FILTER_MESSAGE, SAFETY_FILTER_MESSAGE_EN})
+FALLBACK_MESSAGE_VARIANTS = frozenset({DEEPSEEK_FALLBACK_MESSAGE, DEEPSEEK_FALLBACK_MESSAGE_EN})
+# 空回答占位的中英两版集合：断线保存等逻辑要判「这是不是占位」，本地化后不能再等值比较中文常量。
+EMPTY_ANSWER_VARIANTS = frozenset({EMPTY_ANSWER_MESSAGE, EMPTY_ANSWER_MESSAGE_EN})
 SAFETY_FILTER_WORDS_FILE = _settings.safe_filter_words_file
 DEFAULT_CITY = _settings.default_city
 APP_ENV = (_settings.app_env or "").lower()
@@ -355,6 +430,7 @@ LLM_CONNECT_TIMEOUT = _settings.llm_connect_timeout
 TASK_TTL_SECONDS = _settings.task_ttl_seconds
 
 EMBEDDING_API_URL = _settings.embedding_api_url
+EMBEDDING_TIMEOUT = _settings.embedding_timeout
 EMBEDDING_API_KEY = _settings.embedding_api_key
 EMBEDDING_MODEL = _settings.embedding_model
 EMBEDDING_PROVIDER = _settings.embedding_provider.strip().lower()
@@ -413,6 +489,10 @@ USER_QPS_LIMIT = _settings.user_qps_limit
 USER_DAILY_REQ = _settings.user_daily_req
 USER_DAILY_TOKEN = _settings.user_daily_token
 USER_CONCURRENT = _settings.user_concurrent
+
+# 能力开关（2026-09-30 建了不闭环治理）：默认关，行为与历史等价
+INTENT_USE_LLM = _settings.intent_use_llm
+ORCH_ENABLE_PHASE2 = _settings.orch_enable_phase2
 
 GITHUB_QUESTION_LIMIT = _settings.github_question_limit
 

@@ -2,7 +2,7 @@ import asyncio
 import httpx
 from ..core.logging import setup_logging
 from ..core.config import (
-    DEEPSEEK_MODEL,
+    LLM_PRIMARY_MODEL,
     HTTP_TIMEOUT_MEDIUM,
     apply_llm_request_options,
     llm_endpoint,
@@ -22,12 +22,15 @@ def compress_message_history(messages: list, max_messages: int = 30) -> list:
     summaries = [m for m in messages
                  if m.get("role") == "system" and (m.get("content") or "").startswith("【历史摘要】")]
     rest = [m for m in messages if m not in summaries]
-    # 保护主 system（人格/规则提示词）：它不是对话历史，被压进摘要会让 LLM 失去人设与规则约束。
-    # runner 会对包含主 system 的完整消息列表调用本函数，历史列表无主 system 时此分支不生效
+    # 保护头部**整段连续 system 块**（人格 + 文件上下文等指令性消息）：它们不是
+    # 对话历史，被压进摘要会让 LLM 失去人设/规则/文件内容。2026-09-28 agents 链
+    # 审查 R1 修复：原实现只保第一条 system——ReAct 路的文件上下文是第二条 system
+    # （runner._prepare_task_run），工具轮一多触发压缩时，40k 字文件被折成
+    # "助手: ...前 200 字"的摘要条目，第 2/3 步回答实际看不到文件。
     lead_system = []
-    if rest and rest[0].get("role") == "system" and not (rest[0].get("content") or "").startswith("【历史摘要】"):
-        lead_system = [rest[0]]
-        rest = rest[1:]
+    while (rest and rest[0].get("role") == "system"
+           and not (rest[0].get("content") or "").startswith("【历史摘要】")):
+        lead_system.append(rest.pop(0))
     if len(rest) <= max_messages:
         return messages
 
@@ -46,10 +49,12 @@ def compress_message_history(messages: list, max_messages: int = 30) -> list:
         if not content:
             continue
         # 用户原问题在压缩摘要中保留前100字，助手长文只留前200字控制上下文。
-        if msg.get("role") == "user":
-            prior_text_parts.append(f"用户: {content[:100]}")
-        else:
-            prior_text_parts.append(f"助手: {content[:200]}")
+        # 标签按真实角色（2026-09-28 R1 连带）：system/tool 折进摘要时原先被
+        # 误标成"助手"，摘要里角色错位会误导模型对消息来源的判断。
+        role = msg.get("role")
+        label = {"user": "用户", "assistant": "助手",
+                 "system": "系统", "tool": "工具"}.get(role, role or "内容")
+        prior_text_parts.append(f"{label}: {content[:200] if role != 'user' else content[:100]}")
 
     summary_text = " ".join(prior_text_parts[-4:]) if prior_text_parts else "历史上下文较多"
     compacted = lead_system + summaries + [{
@@ -80,13 +85,13 @@ async def generate_summary(messages: list, max_tokens: int = 300, username: str 
 ---
 摘要：
 """
-    from ..services.chat_support import get_deepseek_key
+    from ..services.chat_support import attach_bill_uid, get_deepseek_key
     api_key = await get_deepseek_key()
     if not api_key:
         return ""
 
     # 主力模型可能是 qwen（百炼端点），按模型名路由端点与密钥
-    base_url, api_key = llm_endpoint(DEEPSEEK_MODEL, api_key)
+    base_url, api_key = llm_endpoint(LLM_PRIMARY_MODEL, api_key)
     # 指数退避重试（最多 3 次）：超时/抖动/空响应都不再让摘要功能静默失效（P1/P2）
     from ..core.concurrency import llm_semaphore
     for attempt in range(3):
@@ -98,15 +103,17 @@ async def generate_summary(messages: list, max_tokens: int = 300, username: str 
                         f"{base_url}/chat/completions",
                         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                         json=apply_llm_request_options({
-                            "model": DEEPSEEK_MODEL,
+                            "model": LLM_PRIMARY_MODEL,
                             "messages": [{"role": "user", "content": prompt}],
                             "temperature": 0.3,
                             "max_tokens": max_tokens
-                        }, DEEPSEEK_MODEL)
+                        }, LLM_PRIMARY_MODEL)
                     )
                     resp.raise_for_status()
                     data = resp.json()
                     # 计入计费（2026-09-09 主人拍板）：记忆压缩属用户请求触发的 LLM 消耗
+                    # 扣费幂等键（P1-②）：本 attempt 即一次上游调用，一次一个键
+                    attach_bill_uid(data.get("usage"))
                     _usage = data.get("usage") or {}
                     if username and (_usage.get("prompt_tokens") or _usage.get("completion_tokens")):
                         from ..services.llm_streaming import record_token_usage

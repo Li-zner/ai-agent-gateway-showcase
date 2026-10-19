@@ -31,7 +31,16 @@ logger = setup_logging()
 router = APIRouter()
 
 # ---------- 登录防暴力破解（P2 修复：密码登录原先可无限尝试）----------
-_LOGIN_FAIL_LIMIT = 5
+# 三档额度（2026-10-18 甲/乙）：原先只有 `ip+username` 一档，可被两种打法绕开：
+#   ① 同一 IP 轮多个用户名（用户名枚举 / 撞库横向扫）：每个用户名各有 5 次额度，
+#      一万个用户名 = 五万次尝试而不触发任何锁 → 补 IP 总量闸（甲）。
+#   ② 代理池轮 IP 打同一个账号：每个 IP 各有额度，账号侧无人记账 → 补账号总量闸（乙）。
+# 乙 的代价要说清：账号锁定可被当 DoS 用（拿受害者用户名狂试就能锁他 15 分钟），
+# 故阈值取到远高于内测真实手滑量级，锁定时长三档共用同一 TTL 自愈、不需人工解锁；
+# 公测流量上来后这两档更适合改判"要求人机验证"（见 丙：/api/login 接 Turnstile）。
+_LOGIN_FAIL_LIMIT = 5        # ip × username：一个访客对一个账号
+_IP_FAIL_LIMIT = 30          # ip：一个访客跨账号合计（甲）
+_USERNAME_FAIL_LIMIT = 20    # username：一个账号被跨 IP 合计打（乙）
 _LOGIN_LOCK_SECONDS = 900
 
 # 登录失败计数/锁定原子化（B-17）：INCR 首次即设 TTL；达上限写锁键并清计数
@@ -93,31 +102,63 @@ def _client_ip(request: Request) -> str:
     return peer or "unknown"
 
 
-async def _check_login_lock(ip: str, username: str):
-    """登录前检查失败锁：达上限的 IP+用户名组合 15 分钟内拒绝"""
-    from ..core.redis import get_redis
-    r = await get_redis()
-    if await r.get(f"login_lock:{ip}:{username}"):
-        raise HTTPException(429, "尝试次数过多，请 15 分钟后再试")
+def _fail_bucket_keys(ip: str, username: str) -> tuple[tuple[str, str, str, int], ...]:
+    """三档失败额度的 (档名, 计数键, 锁键, 上限)：单账号档 + IP 总量档 + 账号总量档
 
-
-async def _record_login_failure(ip: str, username: str):
-    """登录失败累计：达上限写入锁定键（TTL 即锁时长，自愈）。
-
-    INCR/EXPIRE/锁写入收敛进单个 Lua 原子执行（2026-09-15 审查 B-17）：
-    原三步分开，进程在 INCR 与 EXPIRE 之间崩溃会残留无 TTL 键（永不过期）。
+    档名只用于日志归因（哪一档放倒的），不进任何对外响应。
     """
-    from ..core.redis import get_redis
-    r = await get_redis()
-    await r.eval(
-        _LOGIN_FAIL_LUA, 2,
-        f"login_fail:{ip}:{username}", f"login_lock:{ip}:{username}",
-        _LOGIN_LOCK_SECONDS, _LOGIN_FAIL_LIMIT,
+    return (
+        ("pair", f"login_fail:{ip}:{username}", f"login_lock:{ip}:{username}", _LOGIN_FAIL_LIMIT),
+        ("ip", f"login_fail_ip:{ip}", f"login_lock_ip:{ip}", _IP_FAIL_LIMIT),
+        ("user", f"login_fail_user:{username}", f"login_lock_user:{username}", _USERNAME_FAIL_LIMIT),
     )
 
 
+async def _check_login_lock(ip: str, username: str):
+    """登录前检查三档失败锁：任一档达上限即拒绝，TTL 到期自愈。
+
+    三把锁键一次 EXISTS 判完（单个往返，绝不在热路径上问三次）；命中后才逐键
+    回查是哪一档触发的，只为把归因写进日志——拒绝文案不带档位信息，免得访客
+    拿 429 的措辞差异反推各档边界与自己的嫌疑计分。
+    """
+    from ..core.redis import get_redis
+    buckets = _fail_bucket_keys(ip, username)
+    r = await get_redis()
+    if not await r.exists(*[lock for _name, _counter, lock, _limit in buckets]):
+        return
+    for name, _counter, lock, limit in buckets:
+        if await r.exists(lock):
+            logger.warning(
+                "login_locked_out",
+                extra={"extra_fields": {
+                    "bucket": name, "limit": limit, "username": username}},
+            )
+            break
+    raise HTTPException(429, "尝试次数过多，请 15 分钟后再试")
+
+
+async def _record_login_failure(ip: str, username: str):
+    """失败累计：三档各记一笔，达上限的那档写入锁定键（TTL 即锁时长，自愈）。
+
+    INCR/EXPIRE/锁写入收敛进单个 Lua 原子执行（2026-09-15 审查 B-17）：
+    原三步分开，进程在 INCR 与 EXPIRE 之间崩溃会残留无 TTL 键（永不过期）。
+    三档共用同一段 Lua（入参就是"计数键 + 锁键 + 上限"），每档各自原子。
+    """
+    from ..core.redis import get_redis
+    r = await get_redis()
+    for _name, counter_key, lock_key, limit in _fail_bucket_keys(ip, username):
+        await r.eval(
+            _LOGIN_FAIL_LUA, 2, counter_key, lock_key,
+            _LOGIN_LOCK_SECONDS, limit,
+        )
+
+
 async def _clear_login_failures(ip: str, username: str):
-    """登录成功清零失败计数"""
+    """登录成功清零失败计数：只清 `ip × username` 这一档。
+
+    另两档是"总量嫌疑"证据，成功登录一次不能把它们抹掉——否则攻击者只要持有
+    任一个可用账号，从同一出口 IP 穿插正常登录即可把 IP 总量闸反复归零续杯。
+    """
     from ..core.redis import get_redis
     r = await get_redis()
     await r.delete(f"login_fail:{ip}:{username}")
@@ -220,8 +261,13 @@ async def logout(request: Request):
 
 
 @router.post("/api/user/change-password")
-async def change_password(payload: ChangePasswordRequest, current_user: dict = Depends(get_current_user)):
-    """修改当前账号密码：需校验旧密码，bcrypt 更新（A24）"""
+async def change_password(payload: ChangePasswordRequest, request: Request,
+                          current_user: dict = Depends(get_current_user)):
+    """修改当前账号密码：需校验旧密码，bcrypt 更新（A24）。
+
+    旧密码校验复用登录同款三档失败闸（2026-10-19 戊，P1）：原实现无失败闸，
+    持会话者（token 泄露/共享设备）可无限次试旧密码。
+    """
     old_password = payload.old_password
     new_password = payload.new_password
     if len(new_password.encode("utf-8")) > PASSWORD_MAX_BYTES:
@@ -229,9 +275,13 @@ async def change_password(payload: ChangePasswordRequest, current_user: dict = D
     if new_password == old_password:
         raise HTTPException(400, "新密码不能与旧密码相同")
     username = current_user["username"]
+    client_ip = _client_ip(request)
+    await _check_login_lock(client_ip, username)
     user = await authenticate_user(username, old_password)
     if not user:
+        await _record_login_failure(client_ip, username)
         raise HTTPException(400, "旧密码不正确")
+    await _clear_login_failures(client_ip, username)
     # 改密吊销存量会话（2026-09-07 审查 P2）：记录改密时刻，refresh 流程发现
     # token 签发早于该时刻即拒绝——旧 refresh token 最长 30 天有效的窗口被关闭
     import time

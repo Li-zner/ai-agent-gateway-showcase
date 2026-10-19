@@ -3,7 +3,7 @@ import re
 import asyncio
 import httpx
 from ..core.logging import setup_logging
-from ..core.config import DEEPSEEK_MODEL, HTTP_TIMEOUT_MEDIUM
+from ..core.config import LLM_PRIMARY_MODEL, HTTP_TIMEOUT_MEDIUM
 from ..core.jfast import loads as jloads
 
 logger = setup_logging()
@@ -120,7 +120,7 @@ async def call_sub_agent(agent_name: str, args: dict, user_query: str, retry: bo
         # 并行最多 4 路，原先可瞬间占满 LLM 并发额度）
         async with llm_semaphore:
             ok, data = await post_chat_completion(
-                {"model": DEEPSEEK_MODEL, "messages": messages}, HTTP_TIMEOUT_MEDIUM)
+                {"model": LLM_PRIMARY_MODEL, "messages": messages}, HTTP_TIMEOUT_MEDIUM)
         if not ok:
             # 统一抛 HTTPError 进既有的退避重试/兜底通道（诊断体已截断，防 Key 入日志）
             raise httpx.HTTPError(f"upstream {data.get('status')}: {str(data.get('body'))[:80]}")
@@ -129,7 +129,7 @@ async def call_sub_agent(agent_name: str, args: dict, user_query: str, retry: bo
 
         # ---- Token 精细计量（标签跟随实际应答模型：flash 兜底时不再误挂主模型名）----
         from ..core.metrics import llm_tokens_total, llm_tokens_detail, llm_requests_total
-        used_model = data.get("model", DEEPSEEK_MODEL)
+        used_model = data.get("model", LLM_PRIMARY_MODEL)
         usage = data.get("usage", {})
         prompt_tk = usage.get('prompt_tokens', 0) or 0
         completion_tk = usage.get('completion_tokens', 0) or 0

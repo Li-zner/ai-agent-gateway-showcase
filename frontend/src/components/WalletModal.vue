@@ -75,13 +75,14 @@ async function completePayment() {
         <template v-if="step === 1">
           <div class="recharge-rules">
             <div class="rule-title">{{ t('recharge_rules_title') }}</div>
+            <!-- 这些 locale 串自带 <strong>/<span class="highlight"> 且 app.css 有配套样式，须用 v-html 渲染；文案为本仓静态字面量，非用户输入 -->
             <ul>
-              <li>{{ t('rule_2') }}</li>
-              <li>{{ t('rule_3') }}</li>
-              <li>{{ t('rule_4') }}</li>
-              <li>{{ t('rule_6') }}</li>
+              <li v-html="t('rule_2')"></li>
+              <li v-html="t('rule_3')"></li>
+              <li v-html="t('rule_4')"></li>
+              <li v-html="t('rule_6')"></li>
             </ul>
-            <div class="demo-note">{{ t('demo_note') }}</div>
+            <div class="demo-note" v-html="t('demo_note')"></div>
           </div>
           <label>{{ t('recharge_amount') }}</label>
           <div class="amount-grid">

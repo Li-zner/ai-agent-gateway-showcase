@@ -55,7 +55,12 @@ _SQL_SYSTEM_PROMPT = """你是数据分析查询助手，只负责把管理员�
 
 
 def _schema_prompt(schema: dict[str, list[tuple[str, str]]]) -> str:
-    """把表用途与列名拼成 prompt 片段；脱敏列不出现在上下文里，模型看不见就查不到。"""
+    """把表用途与列名拼成 prompt 片段；脱敏列不出现在上下文里。
+
+    P2-1 口径更正（2026-09-28）：这只是**第一道口**（模型看不见就拼不进 SQL），
+    真正的边界在只读角色的列级授权（scripts/rag_readonly_role.sql）——别名/JSON
+    取列都能绕过名字过滤，权限层拦得住；两处清单当前由脱敏列名单维护同一份语义。
+    """
     blocks: list[str] = []
     for table, usage in ALLOWED_TABLES.items():
         columns = [name for name, _type in schema.get(table, [])
@@ -132,6 +137,12 @@ async def _call_llm(messages: list[dict], max_tokens: int) -> str:
     """
     from ..core.config import HTTP_TIMEOUT_MEDIUM
     from .chat_support import post_chat_completion
+    # 计量豁免（业主 2026-10-08 拍板，第四轮待拍板3）：本路径走 post_chat_completion
+    # 裸原语，usage 既不落库也不进计数——10-08 核实该函数体内无任何 usage/metric 落点，
+    # 登记表里"成本侧在 requests 表已有痕迹"这一句不成立。豁免理由按实际口径站住：
+    # 问数是中控台 admin 内部工具，每问 2 次 flash 非流式调用（本仓实测 0.2/0.8 元
+    # 每百万 token），单次量级不足 0.01 元，不为其新建计量链路。将来若多账号开放或
+    # 需要成本可见性，最小改点是在这里补一条 usage 落库。
     ok, data = await post_chat_completion(
         {"model": None, "messages": messages, "temperature": 0.0,
          "max_tokens": max_tokens},
@@ -146,7 +157,12 @@ async def _call_llm(messages: list[dict], max_tokens: int) -> str:
 
 async def generate_sql(question: str, history: list[dict],
                        schema: dict[str, list[tuple[str, str]]]) -> str:
-    """让模型产出 SQL 并过守卫；返回守卫放行后的单条语句。"""
+    """让模型产出 SQL 并过守卫；返回守卫放行后的单条语句。
+
+    P1-9 的 role 校验在路由层收口（rag_admin_data 的 Pydantic field_validator
+    只放行 user/assistant）；本函数不再叠第二层——ask_data 的唯一生产入口
+    就是该路由。直调方（测试）自带合法 history。
+    """
     messages = [
         {"role": "system", "content": _SQL_SYSTEM_PROMPT + _schema_prompt(schema)},
         *history,
@@ -208,6 +224,7 @@ def _dedupe_columns(names) -> list[str]:
     asyncpg 的 keys() 原样返回重名、r[c] 恒取后值，直接 `{c: r[c] for c in columns}`
     会让前列的值被静默覆盖（2026-09-28 批1 P2-12）。列名唯一时原样返回，行为不变。
     """
+    names = list(names)  # Record.keys() 是 tuple_iterator，不可 len()
     if len(set(names)) == len(names):
         return list(names)
     seen: dict[str, int] = {}

@@ -4,14 +4,15 @@
 """
 import asyncio
 import json
+import uuid
 from typing import AsyncIterator
 
 import httpx
 
 from ..models.schemas import ChatRequest
 from ..core.config import (
-    DEEPSEEK_API_BASE, DEEPSEEK_FALLBACK_MESSAGE,
-    DEEPSEEK_FLASH_MODEL, HTTP_TIMEOUT_MEDIUM,
+    DEEPSEEK_API_BASE,
+    LLM_FALLBACK_MODEL, HTTP_TIMEOUT_MEDIUM,
 )
 from ..core.concurrency import llm_semaphore
 from ..core.jfast import loads as jloads
@@ -21,7 +22,10 @@ from ..core.safety_filter import ContentStreamGuard, get_filter
 from ..core.semantic_cache import SemanticCache
 from ..core.stream_utils import sse
 from .civil_grounding import grounding_reply
-from .chat_support import get_deepseek_key, lang_instruction, mark_key_result
+from .chat_support import (
+    attach_bill_uid, get_deepseek_key, lang_instruction, mark_key_result,
+    safety_message, fallback_message,
+)
 
 logger = setup_logging()
 
@@ -38,8 +42,10 @@ async def fallback_flash(req: ChatRequest, username: str) -> AsyncIterator[str]:
         logger.warning("Flash 降级无 API Key，跳过")
         return
     _yielded = False  # 是否已产出内容：中途失败时决定本层补 [DONE] 还是交 chain 兜底
+    # 本次上游调用一个扣费幂等键（P1-②，2026-10-11）：真实 usage 尾块与估算兜底同属这一笔
+    _bill_uid = uuid.uuid4().hex
     try:
-        async for chunk in _flash_sse(req, username, deepseek_api_key):
+        async for chunk in _flash_sse(req, username, deepseek_api_key, _bill_uid):
             _yielded = True
             yield chunk
     except Exception as e:
@@ -55,7 +61,7 @@ async def fallback_flash(req: ChatRequest, username: str) -> AsyncIterator[str]:
 def _flash_payload(req: ChatRequest, username: str) -> dict:
     """构造 Flash 降级请求体（2026-09-11 拆出自 _flash_sse，满足 80 行函数门禁）"""
     return {
-        "model": DEEPSEEK_FLASH_MODEL,
+        "model": LLM_FALLBACK_MODEL,
         "messages": [
             {"role": "system", "content": "你是AI助手，请直接回答用户的问题。如果涉及法律问题，回答相关法律规定；如果无法查询知识库，请如实说明暂无法核实依据，不要编造具体条文号。" + lang_instruction(req)},
             {"role": "user", "content": req.query}
@@ -69,15 +75,16 @@ def _flash_payload(req: ChatRequest, username: str) -> dict:
 
 
 async def _bill_intercepted(_usage, username: str, full_text: str,
-                            record_token_usage, _estimate_tokens) -> None:
+                            record_token_usage, _estimate_tokens, bill_uid: str = "") -> None:
     """DFA 拦截 return 前计费（2026-09-11 P1）：token 已真实消耗。
-    usage 尾块未到时按已产出文本估算（与断连口径一致）。拆出以满足 80 行门禁。"""
+    usage 尾块未到时按已产出文本估算（与断连口径一致）。拆出以满足 80 行门禁。
+    bill_uid（P1-②，2026-10-11）：本次上游调用的幂等键，估算与真实尾块共用。"""
     if _usage:
-        record_token_usage(_usage, username, "")
+        record_token_usage(attach_bill_uid(_usage, bill_uid), username, "")
     elif username and full_text:
         est = _estimate_tokens(full_text)
         record_token_usage(
-            {"prompt_tokens": 0, "completion_tokens": est},
+            attach_bill_uid({"prompt_tokens": 0, "completion_tokens": est}, bill_uid),
             username, "",
             remark=f"DFA拦截估算计费（Flash降级 {est} tokens）")
 
@@ -85,17 +92,23 @@ async def _bill_intercepted(_usage, username: str, full_text: str,
 def _parse_flash_chunk(data_str: str, guard: ContentStreamGuard) -> tuple:
     """解析一条 Flash SSE 数据，返回用量、原始块、安全块和拦截状态。"""
     data = jloads(data_str)
+    if not isinstance(data, dict):
+        # 合法 JSON 但不是对象（null / [] / 数字）：按坏行同待遇交调用方跳过，
+        # 不能让 AttributeError 打断末层降级（10-07 审查 P2，10-06 orchestrator 同族）
+        raise ValueError(f"Flash SSE 非对象 JSON: {type(data).__name__}")
     usage = data.get("usage")
-    choices = data.get("choices") or [{}]
-    chunk = choices[0].get("delta", {}).get("content", "")
+    choices = data.get("choices")
+    first = choices[0] if isinstance(choices, list) and choices else {}
+    delta = first.get("delta") if isinstance(first, dict) else None
+    chunk = delta.get("content", "") if isinstance(delta, dict) else ""
     if not chunk:
         return usage, "", "", False
     piece, blocked = guard.feed(chunk)
     return usage, chunk, piece, blocked
 
 
-async def _flash_sse(req: ChatRequest, username: str, deepseek_api_key: str) -> AsyncIterator[str]:
-    """Flash SSE 消费主体：跨块 DFA 守卫 + include_usage 计量（异常向上传播）。"""
+async def _flash_sse(req: ChatRequest, username: str, deepseek_api_key: str, bill_uid: str = "") -> AsyncIterator[str]:
+    """Flash SSE 消费主体：跨块 DFA 守卫 + include_usage 计量（异常向上传播）；bill_uid=本次上游调用的扣费幂等键（P1-②，两处估算兜底与真实尾块共用）"""
     from .llm_streaming import _estimate_tokens, record_token_usage
     async with llm_semaphore:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_MEDIUM) as client:
@@ -123,16 +136,16 @@ async def _flash_sse(req: ChatRequest, username: str, deepseek_api_key: str) -> 
                                 _new_usage, chunk, _piece, _blocked = _parse_flash_chunk(
                                     data_str, _guard)
                                 if _new_usage:
-                                    _usage = _new_usage
+                                    _usage = attach_bill_uid(_new_usage, bill_uid)
                                 if chunk:
                                     _full_text += chunk
                                     if _blocked:
                                         logger.warning("DFA 拦截Flash降级: 跨块或单块命中")
-                                        _safe_text += sf.safe_message
-                                        yield sse("answer_chunk", sf.safe_message)
+                                        _safe_text += safety_message(req, sf.safe_message)
+                                        yield sse("answer_chunk", safety_message(req, sf.safe_message))
                                         await _bill_intercepted(
                                             _usage, username, _full_text,
-                                            record_token_usage, _estimate_tokens)
+                                            record_token_usage, _estimate_tokens, bill_uid)
                                         yield sse("answer_complete", _safe_text) + "data: [DONE]\n\n"
                                         return
                                     if _piece:
@@ -146,18 +159,18 @@ async def _flash_sse(req: ChatRequest, username: str, deepseek_api_key: str) -> 
                     # 已产出文本估算，口径见 llm_streaming._estimate_tokens
                     if username and _full_text:
                         record_token_usage(
-                            {"prompt_tokens": 0, "completion_tokens": _estimate_tokens(_full_text)},
+                            attach_bill_uid({"prompt_tokens": 0, "completion_tokens": _estimate_tokens(_full_text)}, bill_uid),
                             username, "",
                             remark=f"断连估算补计费（Flash降级 {_estimate_tokens(_full_text)} tokens）")
                     raise
                 _tail, _tail_blocked = _guard.flush()
                 if _tail_blocked:
                     logger.warning("DFA 流尾拦截Flash降级")
-                    _safe_text += sf.safe_message
-                    yield sse("answer_chunk", sf.safe_message)
+                    _safe_text += safety_message(req, sf.safe_message)
+                    yield sse("answer_chunk", safety_message(req, sf.safe_message))
                     await _bill_intercepted(
                         _usage, username, _full_text,
-                        record_token_usage, _estimate_tokens)
+                        record_token_usage, _estimate_tokens, bill_uid)
                     yield sse("answer_complete", _safe_text) + "data: [DONE]\n\n"
                     return
                 if _tail:
@@ -166,7 +179,7 @@ async def _flash_sse(req: ChatRequest, username: str, deepseek_api_key: str) -> 
                 # 计量扣费（2026-09-09 审查 P1）：正常路径按真实 usage 计费；
                 # 拦截路径已由 _bill_intercepted 提前完成，避免 usage 双计。
                 if _usage:
-                    record_token_usage(_usage, username, "", model=DEEPSEEK_FLASH_MODEL)
+                    record_token_usage(_usage, username, "", model=LLM_FALLBACK_MODEL)
                 # answer_complete 承载终检后的完整内容；空全文什么都不发——
                 # 原先在此补裸 [DONE] 会让上层 _yielded 置真、fallback_chain 的
                 # 空流兜底分支（answer_complete+[DONE]）永不触发，整条流反而
@@ -228,4 +241,4 @@ async def fallback_chain(req: ChatRequest, username: str, cache_ctx: str = "") -
             await SemanticCache.set_empty(req.query, cache_ctx=cache_ctx, ttl=30)
         except Exception as e:
             logger.debug(f"穿透占位写入失败（TTL 自愈）: {e}")
-        yield sse("answer_complete", DEEPSEEK_FALLBACK_MESSAGE) + "data: [DONE]\n\n"
+        yield sse("answer_complete", fallback_message(req)) + "data: [DONE]\n\n"

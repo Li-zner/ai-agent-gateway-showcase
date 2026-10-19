@@ -8,7 +8,6 @@ import os
 import re
 import time
 import uuid
-import signal
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -183,19 +182,6 @@ class CdcWorker:
         cdc_events_processed_total.inc(len(rows))
         return len(rows)
 
-    def _register_signal_handlers(self):
-        """注册 SIGTERM/SIGINT：优雅退出确保 checkpoint 落盘（P1 #4）"""
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            try:
-                loop.add_signal_handler(sig, self._request_stop)
-            except (NotImplementedError, ValueError):  # noqa: silent-except 豁免：Windows/受限平台无信号处理器（平台惯例）
-                pass
-
-    def _request_stop(self):
-        """信号回调：标记停止（同步，由 run() 的 finally 落盘）"""
-        self.running = False
-
     async def _update_lag(self, pool):
         """更新滞后指标：仅当存在待处理事件时计算（P1 #10 防无事件时虚假告警）"""
         try:
@@ -299,7 +285,9 @@ class CdcWorker:
         """主循环：先校验 schema（瞬时故障带退避重试，不杀 worker，P1 #10），
         再只在持有 leader 锁时消费事件；finally 落盘关闭。"""
         self.running = True
-        self._register_signal_handlers()
+        # 不注册进程信号处理器（2026-10-07 P0-2）：loop 层信号抢装会覆盖
+        # uvicorn 先装的 SIGTERM/SIGINT 处理器，令优雅关停整体失效；checkpoint
+        # 落盘由 SIGTERM→uvicorn shutdown→lifespan→stop()→run() finally 链路覆盖
         pool = None
         try:
             # schema 校验：失败重试而非永久退出，避免瞬时 DB 故障把 worker 停掉（#10）。

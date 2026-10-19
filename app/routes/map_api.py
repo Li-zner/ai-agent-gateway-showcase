@@ -4,7 +4,6 @@ import httpx
 import os
 import json
 import re
-from datetime import datetime, timezone
 from ..middleware.auth import get_current_user
 from ..core.config import AMAP_API_KEY, HTTP_TIMEOUT_MEDIUM, MAP_API_TIMEOUT
 from ..core.logging import setup_logging
@@ -62,10 +61,37 @@ def _san_city(city: str) -> str:
     return re.sub(r"[\r\n]", "", city or "")[:64]
 
 
+async def _geocode_ok(city: str) -> bool:
+    """推荐池生成前的城市名校验：高德 geocode + 包含性守卫（投毒 P1 主修）。
+
+    高德不可用（无 Key/网络）时 fail-closed 拒绝生成——宁可不生成也不让未
+    校验文本进提示词与共享池；池命中与默认兜底不受影响。
+    """
+    from ..core.config import AMAP_API_KEY, MAP_API_TIMEOUT
+    from ..core.place_extract import geocode_contains
+    if not AMAP_API_KEY:
+        return False
+    try:
+        # 2026-09-30 校准收敛（B3）：本文件其余五处同服务调用均用 MAP_API_TIMEOUT
+        async with httpx.AsyncClient(timeout=MAP_API_TIMEOUT) as client:
+            resp = await client.get(
+                "https://restapi.amap.com/v3/geocode/geo",
+                params={"key": AMAP_API_KEY, "address": city})
+            data = resp.json()
+        if data.get("status") != "1" or not data.get("geocodes"):
+            return False
+        return geocode_contains(city, data["geocodes"][0])
+    except Exception as geo_err:
+        logger.warning(f"recommend 城市校验失败（fail-closed 拒生成）: {geo_err}")
+        return False
+
+
 async def _city_cache_get(city: str, kind: str):
     from ..core.redis import get_redis
     r = await get_redis()
-    day = datetime.now().strftime("%Y%m%d")
+    # A-R2（2026-09-29 对齐）：naive 本地时间改业务日（上海 05:00 切，day_window 真相源）
+    from ..core.day_window import quota_day_compact
+    day = quota_day_compact()
     raw = await r.get(f"{CITY_CACHE_PREFIX}{kind}:{day}:{_san_city(city)}")
     if raw is None:
         return None
@@ -82,7 +108,8 @@ async def _city_cache_put(city: str, kind: str, payload, force: bool = False) ->
     （_recommend_pool_put），不再走本函数。"""
     from ..core.redis import get_redis
     r = await get_redis()
-    day = datetime.now().strftime("%Y%m%d")
+    from ..core.day_window import quota_day_compact
+    day = quota_day_compact()
     member = f"{kind}:{_san_city(city)}"
     zkey = CITY_HIT_ZSET.format(date=day)
     await r.zincrby(zkey, 1, member)
@@ -297,6 +324,14 @@ async def get_recommend(city: str, force: int = 0, current_user: dict = Depends(
         if picked is not None:
             logger.info(f"[map-perf] recommend city={city} cache=pool_hit")
             return picked
+    # 城市名 geocode 校验（2026-09-29 投毒 P1 主修）：池命中不需要（池键只含
+    # 校验过的城市），生成/刷新路径必须过——city 是自由文本，未校验就直接进
+    # LLM 提示词并落 15 天全员共享池，域名公开后任何登录用户一次请求即可
+    # 用伪城市名夹带指令灌池。校验用高德 geocode + 包含性守卫（与 weather/
+    # 路线规划同一真相源 core.place_extract.geocode_contains）。
+    if not await _geocode_ok(city):
+        raise HTTPException(status_code=400,
+                            detail=f"无法识别的城市名: {city[:20]}，请输入真实城市")
     # 配额门禁（2026-09-07 审查 P1）：原先完全绕过 ensure_chat_allowed/日 token 限额，
     # 登录用户可刷 LLM 配额；LLM 调用期间占用并发槽位，finally 释放
     from ..services.chat_stream_ctx import ensure_chat_allowed
@@ -361,10 +396,10 @@ async def _recommend_llm(city: str, username: str = "") -> dict:
 2. 只返回 JSON 格式，不要有其他文字。
 格式：{{"foods":["美食1","美食2","美食3"], "spots":["景点1","景点2","景点3"]}}
 """
-    from ..core.config import DEEPSEEK_MODEL
+    from ..core.config import LLM_PRIMARY_MODEL
     # payload 对齐主链路成功形态：无 max_tokens（部分网关拒绝这些参数返回 400）
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": LLM_PRIMARY_MODEL,
         "temperature": round(random.uniform(0.9, 1.3), 2),
         "messages": [{"role": "user", "content": prompt}],
     }
@@ -456,23 +491,23 @@ async def _plan_route_llm(departure: str, destination: str, username: str = "") 
   "recommendation": "建议先飞广州，再转高铁到珠海，全程约4小时"
 }}"""
     from ..core.config import (
-        DEEPSEEK_MODEL,
+        LLM_PRIMARY_MODEL,
         apply_llm_request_options,
         llm_endpoint,
     )
     from ..core.concurrency import llm_semaphore
-    base_url, api_key = llm_endpoint(DEEPSEEK_MODEL, deepseek_key)
+    base_url, api_key = llm_endpoint(LLM_PRIMARY_MODEL, deepseek_key)
     async with llm_semaphore:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_MEDIUM) as client:
             resp = await client.post(
                 f"{base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json=apply_llm_request_options({
-                    "model": DEEPSEEK_MODEL,
+                    "model": LLM_PRIMARY_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.3,
                     "max_tokens": 500,
-                }, DEEPSEEK_MODEL)
+                }, LLM_PRIMARY_MODEL)
             )
             if resp.status_code != 200:
                 raise HTTPException(502, "DeepSeek API error")
@@ -505,7 +540,8 @@ async def amap_route(req: RouteRequest, current_user: dict = Depends(get_current
         raise HTTPException(429, "并发请求过多，请稍后再试")
     try:
         result = await _plan_amap_route(req)
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        from ..core.day_window import quota_day
+        today = quota_day()
         await update_daily_usage(username, today, inc_request=1, inc_token=0)
         return result
     finally:

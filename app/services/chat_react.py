@@ -4,9 +4,10 @@
 """
 import asyncio
 import json
+import uuid
 from typing import AsyncIterator, Dict, List, Optional
 
-from ..core.config import DEEPSEEK_MODEL, TOOL_TIMEOUT
+from ..core.config import LLM_PRIMARY_MODEL, TOOL_TIMEOUT
 from ..core.logging import setup_logging
 from ..core.persona_manager import is_civil_persona
 from ..core.stream_utils import dispatch_tool, sse
@@ -15,7 +16,7 @@ from ..core.safety_filter import (
     serialize_untrusted_value,
 )
 from .chat_stream_ctx import ChatStreamCtx, finalize_answer
-from .chat_support import display_safe_tool_result, hide_reasoning, mark_key_result
+from .chat_support import display_safe_tool_result, hide_reasoning, mark_key_result, thinking_text, safety_message, empty_answer, incomplete_answer
 from .conversation_profiles import persist_weather_snapshot
 from .llm_streaming import _spawn_drain_bill, record_token_usage, stream_llm_throttled
 from .chat_fallback import fallback_chain
@@ -23,6 +24,8 @@ from .rag_request_trace import mark_route
 
 logger = setup_logging()
 MAX_STEPS = 3
+# 圆桌讨论心跳间隔：远小于前端 60s 空闲看门狗（api/chat.ts），又不至于频繁发送
+_HEARTBEAT_INTERVAL_S = 15.0
 
 
 def _accumulate_tool_calls(tool_calls_index: Dict, delta: List[dict]) -> Dict:
@@ -56,14 +59,18 @@ def _frame_tool_calls(tool_calls_index: Dict) -> Optional[List[dict]]:
     ]
 
 
-def _drain_bill_blocked(agen, ctx: ChatStreamCtx, fallback_text: str) -> None:
+def _drain_bill_blocked(agen, ctx: ChatStreamCtx, fallback_text: str,
+                        bill_uid: str) -> None:
     """DFA 拦截 break 遗弃上游生成器时的计费排空（2026-09-12 深检 P1）。
 
     usage 尾块未消费则本步计 0，而上游 token 已真实消耗——与断连同款机制
     排空计费；正常结束的 usage 已在流内消费，不会双计。
+    bill_uid 照断连同款传下去（P1-1）：此刻本步的 usage 可能已经扣过，排空的
+    估算兜底必须落在同一个幂等键上。
     """
     _spawn_drain_bill(agen, ctx.username, ctx.conv_id, "react-blocked",
-                      fallback_text=fallback_text)
+                      fallback_text=fallback_text, bill_uid=bill_uid,
+                      file_ctx_chars=getattr(ctx, "file_ctx_chars", 0))
 
 
 async def _fallback_and_finalize(ctx: ChatStreamCtx, full_content: str) -> AsyncIterator[str]:
@@ -88,7 +95,7 @@ async def _fallback_and_finalize(ctx: ChatStreamCtx, full_content: str) -> Async
     async for chunk in fallback_chain(ctx.req, ctx.username, cache_ctx=ctx.cache_ctx):
         yield chunk
         _fb_text = accumulate_sse_text(_fb_text, chunk)
-    _final = _fb_text or full_content or "抱歉，我暂时无法回答。"
+    _final = _fb_text or full_content or empty_answer(ctx.req)
     ctx.partial_answer = _final
     ctx.saved_normally = True
     ctx.finished = True
@@ -128,9 +135,11 @@ async def _stream_react(ctx: ChatStreamCtx, model_try: str, frame: Dict) -> Asyn
     _content_guard = ContentStreamGuard(sf)
     tool_calls_index: Dict = {}
     usage = {"prompt_tokens": 0, "completion_tokens": 0}
+    # 本步上游调用的扣费幂等键（P1-1）：断连/DFA 拦截后的排空兜底沿用同一个
+    _bill_uid = uuid.uuid4().hex
     _agen = stream_llm_throttled(
         ctx, ctx.api_key, model_try, ctx.messages,
-        username=ctx.username, tools=ctx.tools, tool_choice="auto",
+        username=ctx.username, tools=ctx.tools, tool_choice="auto", bill_uid=_bill_uid,
     )
     try:
         async for kind, payload in _agen:
@@ -148,10 +157,10 @@ async def _stream_react(ctx: ChatStreamCtx, model_try: str, frame: Dict) -> Asyn
                 # 发往前端，事后检查拦不回（与 runner 任务路径同一标准）
                 _piece, _blocked = _content_guard.feed(payload)
                 if _blocked:
-                    full_content += sf.safe_message
-                    yield sse("answer_chunk", sf.safe_message)
+                    full_content += safety_message(ctx.req, sf.safe_message)
+                    yield sse("answer_chunk", safety_message(ctx.req, sf.safe_message))
                     content_blocked = True
-                    _drain_bill_blocked(_agen, ctx, full_content)
+                    _drain_bill_blocked(_agen, ctx, full_content, _bill_uid)
                     break
                 if _piece:
                     full_content += _piece
@@ -163,8 +172,8 @@ async def _stream_react(ctx: ChatStreamCtx, model_try: str, frame: Dict) -> Asyn
             _tail, _tail_blocked = _content_guard.flush()
             if _tail_blocked:
                 content_blocked = True
-                full_content += sf.safe_message
-                yield sse("answer_chunk", sf.safe_message)
+                full_content += safety_message(ctx.req, sf.safe_message)
+                yield sse("answer_chunk", safety_message(ctx.req, sf.safe_message))
             elif _tail:
                 full_content += _tail
                 yield sse("answer_chunk", _tail)
@@ -182,11 +191,11 @@ async def _stream_react(ctx: ChatStreamCtx, model_try: str, frame: Dict) -> Asyn
         frame["fallback"] = True
         return
     except (GeneratorExit, asyncio.CancelledError):
-        # 客户端断连排空计费（2026-09-09 审查 P1 修复：断连漏扣费）：此刻上游流未关闭，
-        # 排空任务接管消费拿真实 usage 补计费；不走上方 fallback（客户端已断开），
-        # 原样上抛不吞取消
+        # 断连排空计费（09-09 P1）：上游流未关，排空拿真实 usage 补计费；
+        # 不走 fallback（已断开），原样上抛不吞取消
         _spawn_drain_bill(_agen, ctx.username, ctx.conv_id, "react-step",
-                          fallback_text=full_content)
+                          fallback_text=full_content, bill_uid=_bill_uid,
+                          file_ctx_chars=getattr(ctx, "file_ctx_chars", 0))
         raise
     frame["full_reasoning"] = full_reasoning
     frame["full_content"] = full_content
@@ -214,7 +223,9 @@ async def _execute_react_tools(ctx: ChatStreamCtx, tool_calls: List[dict], frame
             # 跳过会让坏调用拿到别人的结果、末尾 tool_call 缺 tool 消息（下轮 LLM 请求 400）
             args = None
         parsed.append((func_name, args))
-        yield f"data: {json.dumps({'type': 'tool_call', 'name': func_name, 'args': args if args is not None else {}})}\n\n"
+        # args 与 tool_result 同过消毒：模型参数里带的是用户原句/检索词，
+        # 直发等于绕过 DFA 的第二外发通道（10-07 审查 P2）
+        yield f"data: {json.dumps({'type': 'tool_call', 'name': func_name, 'args': display_safe_tool_result(args) if args is not None else {}})}\n\n"
 
     tasks = []
     for func_name, args in parsed:
@@ -242,10 +253,9 @@ async def _execute_react_tools(ctx: ChatStreamCtx, tool_calls: List[dict], frame
             if not _t.done():
                 _t.cancel()
         logger.warning("工具并行调用超时，触发降级")
-        _timeout_note = (
-            '知识库查询超时，本次无法基于民法典依据继续回答。'
-            if is_civil_persona(ctx.persona_id)
-            else '知识库查询超时，正在基于已有知识继续回答...'
+        _timeout_note = thinking_text(
+            "kb_timeout_civil" if is_civil_persona(ctx.persona_id) else "kb_timeout",
+            ctx.req,
         )
         yield sse("reasoning_chunk", _timeout_note)
         tool_results = [{"error": "工具查询超时", "fallback": True} for _ in tool_calls]
@@ -345,8 +355,21 @@ async def _roundtable(ctx: ChatStreamCtx, tool_calls: List[dict], tool_results: 
                         {"untrusted_tool_data": serialize_untrusted_value(result)},
                     )
         if orch.get_involved_agents() and len(agent_names) > 1:
-            yield sse("thought", '专家们正在讨论分析...')
-            discussion_summary = await orch.run(enable_phase2=False)
+            yield sse("thought", thinking_text("experts", ctx.req))
+            from ..core.config import ORCH_ENABLE_PHASE2
+            # 圆桌 Phase1 并行多次子 Agent LLM 调用，期间零 SSE 外发——前端
+            # 60s 空闲看门狗（api/chat.ts）会把这段静默误判成连接僵死而 cancel，
+            # 表现为"卡在调用完成工具后"。把讨论跑成任务，等待期间每
+            # _HEARTBEAT_INTERVAL_S 秒发一条 SSE 注释行（解析器忽略、字节到达即续命）。
+            _run = asyncio.ensure_future(
+                orch.run(enable_phase2=ORCH_ENABLE_PHASE2))
+            while True:
+                try:
+                    discussion_summary = await asyncio.wait_for(
+                        asyncio.shield(_run), timeout=_HEARTBEAT_INTERVAL_S)
+                    break
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
     except Exception as orch_err:
         logger.warning(f"多Agent讨论异常（降级为常规模式）: {orch_err}")
     frame["discussion_summary"] = discussion_summary
@@ -358,6 +381,10 @@ async def _inject_discussion(ctx: ChatStreamCtx, discussion_summary: str) -> Asy
     CHAT-1（2026-09-19 审查）：摘要出自子 Agent 的 LLM 输出，与主链路思考同
     性质，必须过同一个 ReasoningStreamGuard——此前模型身份/端点/工具失败类
     内容可整段零过滤外泄。
+
+    批1 B-P1-2（2026-09-28）：给模型的 system 副本与给前端的思考副本**必须同源**。
+    改前只过滤了外发那一份，注入 prompt 的仍是裸摘要——守卫挡掉的那些内容照样以
+    "内部参考"的身份进了上下文，主模型把它复述进回答就绕过了整个 CHAT-1 闸门。
     """
     if not discussion_summary:
         return
@@ -376,7 +403,7 @@ async def _inject_discussion(ctx: ChatStreamCtx, discussion_summary: str) -> Asy
             "**禁止在回答中提及**「专家」「天气专家说」「据讨论」「根据分析」等词汇。\n"
             "不要引用任何专家意见，不要用「某某专家认为」的句式。\n"
             "用你自己的口吻，把这些信息整合成一段流畅的建议。\n\n"
-            f"{discussion_summary}"
+            f"{safe_text}"
         ),
     })
 
@@ -384,39 +411,47 @@ async def _inject_discussion(ctx: ChatStreamCtx, discussion_summary: str) -> Asy
 async def _react_step(ctx: ChatStreamCtx, step: int) -> AsyncIterator[str]:
     """一步 ReAct：流式 → 若纯文本则收尾；否则工具执行/圆桌/回填后进入下一步"""
     frame: Dict = {}
-    async for ev in _stream_react(ctx, DEEPSEEK_MODEL, frame):
+    # 跟人格选定模型（10-08 台账 469）：缺省回落主力槽。步内不换模型重试——
+    # 本步的 answer_chunk 已实时外发，换模型重答会与半截重复（D2 P2-1 契约）
+    _model_used = getattr(ctx, "selected_model", "") or LLM_PRIMARY_MODEL
+    async for ev in _stream_react(ctx, _model_used, frame):
         yield ev
     if frame.get("fallback"):
         return
-    record_token_usage(frame["usage"], ctx.username, ctx.conv_id)
+    # L2：文件注入长度并入 usage 携带（同会话只计一次的扣除依据）
+    record_token_usage(
+        {**frame["usage"], "file_ctx_chars": getattr(ctx, "file_ctx_chars", 0)},
+        ctx.username, ctx.conv_id, model=_model_used)
 
     # 流中被 DFA 拦截：直接以已发送的安全文本收尾（full_content = 安全前缀 + 安全文案），
     # 不再进入工具分支；被拦截内容不写缓存（避免把"安全文案"钉成该 query 的长期答案）
     if frame.get("content_blocked"):
-        final_safe = frame["full_content"] or "抱歉，我暂时无法回答。"
+        final_safe = frame["full_content"] or empty_answer(ctx.req)
         yield sse("answer_complete", final_safe) + "data: [DONE]\n\n"
         ctx.partial_answer = final_safe
-        await finalize_answer(ctx, final_safe, write_cache=False)
+        # 先置位再 finalize（C-F11，与 fast_paths 09-28 统一口径）：内容已送达，
+        # 台账异常绝不能让上层再降级出第二段回答
         ctx.saved_normally = True
         ctx.finished = True
+        await finalize_answer(ctx, final_safe, write_cache=False)
         return
 
     tool_calls = frame["tool_calls"]
     if not tool_calls:
         # 纯文本回答：内容已逐块流式发送，此处仅做 DFA 检查 + 完成标记
         _cacheable = bool(frame["full_content"])
-        final_safe = frame["full_content"] or "抱歉，我暂时无法回答。"
+        final_safe = frame["full_content"] or empty_answer(ctx.req)
         sf = get_filter()
         if sf.contains_sensitive(final_safe):
             logger.warning(f"DFA 拦截响应")
-            final_safe = sf.safe_message
+            final_safe = safety_message(ctx.req, sf.safe_message)
             _cacheable = False
             yield sse("answer_chunk", final_safe)
         yield sse("answer_complete", final_safe) + "data: [DONE]\n\n"
         ctx.partial_answer = final_safe
-        await finalize_answer(ctx, final_safe, write_cache=_cacheable)
-        ctx.saved_normally = True
+        ctx.saved_normally = True  # 先置位再 finalize（C-F11）
         ctx.finished = True
+        await finalize_answer(ctx, final_safe, write_cache=_cacheable)
         return
 
     async for ev in _execute_react_tools(ctx, tool_calls, frame):
@@ -425,9 +460,11 @@ async def _react_step(ctx: ChatStreamCtx, step: int) -> AsyncIterator[str]:
     if law_mapping_hit:
         logger.info("法律映射表命中，跳过LLM生成，直接返回引导信息")
         yield sse("answer_complete", law_mapping_hit) + "data: [DONE]\n\n"
-        await finalize_answer(ctx, law_mapping_hit)
-        ctx.saved_normally = True
+        # write_cache=False：与 law_mapping_gate 同口径——规则文案不是 LLM 成果，
+        # 进缓存会让映射表修订在 TTL 内不生效
+        ctx.saved_normally = True  # 先置位再 finalize（C-F11）
         ctx.finished = True
+        await finalize_answer(ctx, law_mapping_hit, write_cache=False)
         return
 
     if is_civil_persona(ctx.persona_id):
@@ -435,9 +472,9 @@ async def _react_step(ctx: ChatStreamCtx, step: int) -> AsyncIterator[str]:
         if not any(civil_tool_result(result) for result in (tool_results or [])):
             _civil_stop = grounding_reply("no_evidence", ctx.req.lang)
             yield sse("answer_complete", _civil_stop) + "data: [DONE]\n\n"
-            await finalize_answer(ctx, _civil_stop, write_cache=False)
-            ctx.saved_normally = True
+            ctx.saved_normally = True  # 先置位再 finalize（C-F11）
             ctx.finished = True
+            await finalize_answer(ctx, _civil_stop, write_cache=False)
             return
 
     round_frame: Dict = {}
@@ -454,7 +491,7 @@ async def _react_step(ctx: ChatStreamCtx, step: int) -> AsyncIterator[str]:
 async def react_loop(ctx: ChatStreamCtx) -> AsyncIterator[str]:
     """ReAct 主循环（max_steps）；耗尽后返回已有内容兜底"""
     mark_route("react")
-    yield sse("thought", '正在分析你的问题...')
+    yield sse("thought", thinking_text("analyzing", ctx.req))
     await ctx.mm.save_user_message({"role": "user", "content": ctx.req.query})
     # P0 修复（2026-09-11 规则审查）：ctx.messages 由 _assemble_messages 组装时
     # 只有 system+历史（旧版 v2.py 单体里有 user 消息追加，纯移动重构时丢失），
@@ -478,10 +515,10 @@ async def react_loop(ctx: ChatStreamCtx) -> AsyncIterator[str]:
                 from .civil_grounding import grounding_reply
                 last_content = grounding_reply("service_error", ctx.req.lang)
             else:
-                last_content = "抱歉，我暂时无法完成完整的回答。"
+                last_content = incomplete_answer(ctx.req)
         logger.warning(f"V2 循环达到最大步数，返回已有内容: {len(last_content)} chars")
         yield sse("answer_complete", last_content) + "data: [DONE]\n\n"
         ctx.partial_answer = last_content
-        await finalize_answer(ctx, last_content, write_cache=False)
-        ctx.saved_normally = True
+        ctx.saved_normally = True  # 先置位再 finalize（C-F11）
         ctx.finished = True
+        await finalize_answer(ctx, last_content, write_cache=False)

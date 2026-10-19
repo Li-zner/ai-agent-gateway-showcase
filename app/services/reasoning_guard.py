@@ -6,6 +6,7 @@ import re
 from typing import List
 
 from ..core.logging import setup_logging
+from ..core.safety_filter import has_control_token
 
 logger = setup_logging()
 
@@ -135,10 +136,11 @@ class ReasoningStreamGuard:
         self._dead = False  # 强指纹命中后的整流抑制开关
 
     def _suppress_hit(self, text: str) -> bool:
-        """强指纹检测：系统设定/失败信号/模型身份/Key 形状，命中即整流抑制"""
+        """强指纹检测：系统设定/失败信号/模型身份/Key 形状/控制标记，命中即整流抑制"""
         return (
             _REASONING_SUPPRESS_RE.search(text) is not None
             or _KEY_SHAPE_RE.search(text) is not None
+            or has_control_token(text)
         )
 
     def feed(self, chunk: str) -> str:

@@ -18,9 +18,6 @@
 }
 .ops-sidebar { padding: 20px 14px; border-right: 1px solid var(--border-color, #dfe5de); }
 .ops-insight { padding: 20px 16px; border-left: 1px solid var(--border-color, #dfe5de); }
-.brand { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; font-size: 19px; }
-.status-dot { width: 9px; height: 9px; border-radius: 50%; background: #9ca3af; }
-.status-dot.online { background: #22c55e; box-shadow: 0 0 0 4px rgb(34 197 94 / 12%); }
 .new-chat {
   width: 100%; border: 0; border-radius: 6px; padding: 11px 12px;
   background: var(--primary, #3d7a5c); color: #fff; font-weight: 600; cursor: pointer;
@@ -110,11 +107,6 @@ button { font: inherit; }
 .message-body.markdown :deep(li:last-child) { margin-bottom: 0; }
 .message-body.markdown :deep(pre) { overflow-x: auto; padding: 10px; background: var(--bg-body, #eef1ec); border-radius: 5px; }
 .thinking { color: var(--text-muted, #5f6e66); }
-.quick-prompts { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 22px 12px; }
-.quick-prompts button {
-  border: 1px solid var(--border-color, #dfe5de); border-radius: 999px;
-  padding: 7px 12px; background: var(--bg-card, #fff); color: var(--text-secondary, #54635a); cursor: pointer;
-}
 .composer { display: flex; gap: 10px; padding: 12px max(20px, 3vw) 18px; border-top: 1px solid var(--border-color, #dfe5de); }
 .composer textarea {
   flex: 1; min-height: 52px; max-height: 140px; resize: none;
@@ -264,72 +256,381 @@ button { font: inherit; }
   .composer { padding: 10px 12px 14px; }
 }
 
-/* ===== L2 知识变更集（diff 预览 + 审批） ===== */
-.changeset-context { display: flex; flex-direction: column; gap: 10px; }
-.changeset-card {
-  border: 1px solid var(--border, #dbe4de);
-  border-radius: 8px;
-  padding: 10px 12px;
+/* ===== Agent 对话台人格切换（2026-10-02）===== */
+/* 问数与 DB Agent 人格共用运维侧栏，只收掉右侧洞察栏（两列布局） */
+.ops-shell.wide-mode {
+  grid-template-columns: 250px minmax(0, 1fr);
+}
+
+/* ===== 固定顶栏（2026-10-02 定稿）：数据台/诊断助手/数据库Agent 并列 ===== */
+.top-nav {
+  position: sticky;
+  top: 0;
+  z-index: 15;
+  display: flex;
+  gap: 6px;
+  padding: 8px 4px;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.25);
+}
+.top-nav button {
+  border: 1px solid rgba(127, 127, 127, 0.4);
+  background: transparent;
+  border-radius: 6px;
+  padding: 6px 16px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.top-nav button.active {
+  background: rgba(127, 127, 127, 0.25);
+  font-weight: 600;
+}
+/* 待审批角标（T1）：数量 = awaiting_* 任务数，仅审批能力可见 */
+.nav-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #e11d48;
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+  vertical-align: 1px;
+}
+.top-context {
+  margin: 6px 4px;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+/* ===== 侧栏会话列表（ZCode 项目列表式，2026-10-02）===== */
+.session-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  background: var(--surface, #fff);
+  gap: 2px;
+  max-height: 180px;
+  overflow-y: auto;
 }
-.changeset-heading {
+
+.session-item {
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  gap: 2px;
+  border-radius: 6px;
+  padding: 2px 4px;
 }
-.changeset-heading small { color: var(--text-muted, #5f6e66); font-size: 11px; }
-.changeset-diff {
+
+.session-item.active {
+  background: rgba(127, 127, 127, 0.18);
+}
+
+/* 事件分组行（2026-10-03 折叠版）：div 包裹（button 不可嵌套 button）。
+   chevron 在行首（树形惯例位）：点它收/展该事件的嵌套会话；点标题开窗 */
+.incident-node {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0;
+  border-radius: 6px;
+}
+
+.incident-open {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  padding: 9px 10px 9px 2px;
+}
+
+.chevron-btn,
+.chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  color: var(--text-muted, #5f6e66);
+  padding: 4px 6px;
+  font-size: 15px;
+  line-height: 1;
+  opacity: 0.9;
+  transition: transform 0.15s ease;
+}
+
+.chevron-btn:hover,
+.chevron-btn:focus,
+.chevron:hover {
+  opacity: 1;
+  color: var(--primary, #3d7a5c);
+}
+
+.chevron-btn.closed,
+.chevron.closed {
+  transform: rotate(-90deg);
+}
+
+/* 事件顺序编号（1 起，随编号表注入助手上下文） */
+.incident-no {
+  color: var(--text-muted, #5f6e66);
+  font-weight: 600;
+  margin-right: 2px;
+}
+
+/* 可折叠分区标题（通用会话/DB 会话） */
+.section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  margin: 22px 0 8px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-muted, #5f6e66);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.section-toggle .chevron {
+  padding: 2px 2px;
+}
+
+.section-toggle .count {
+  margin-left: auto;
+  font-weight: 400;
+  opacity: 0.75;
+}
+
+.session-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 6px;
+}
+
+.session-title {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-title small {
+  opacity: 0.6;
+}
+
+.session-time {
+  flex: none;
+  font-size: 11px;
+  opacity: 0.5;
+}
+
+/* 行内重命名输入（✎/双击触发） */
+.session-rename {
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  padding: 2px 4px;
+  border: 1px solid rgba(127, 127, 127, 0.5);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+}
+
+/* 会话条目操作（✎ 重命名 / × 删除），hover 才完全显形 */
+.session-act {
+  flex: none;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0.45;
+  padding: 2px 4px;
+  font-size: 13px;
+}
+
+.session-act:hover {
+  opacity: 1;
+}
+
+/* DB Agent 侧栏只有一个会话列表：放开诊断侧栏的 180px 限高 */
+.dbagent-session-list {
+  max-height: none;
+  flex: 1;
+}
+
+/* 改动日志（变更账本）：状态徽标 + SQL 摘要 + 回滚按钮 */
+.change-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: 220px;
+  max-height: 260px;
   overflow-y: auto;
 }
-.changeset-item { display: flex; gap: 8px; align-items: flex-start; }
-.diff-sign {
-  font-family: monospace;
-  font-weight: 700;
-  width: 14px;
-  flex: none;
-  text-align: center;
-}
-.diff-sign.add { color: #0a7d33; }
-.diff-sign.del { color: #b42318; }
-.changeset-item strong { font-size: 12px; }
-.changeset-item p {
-  margin: 2px 0 0;
-  font-size: 12px;
-  color: var(--text-muted, #5f6e66);
-  overflow-wrap: anywhere;
-}
-.changeset-warn {
-  margin: 0;
-  font-size: 12px;
-  color: #92400e;
-  background: #fef3c7;
-  border-radius: 6px;
-  padding: 6px 8px;
-}
 
-/* ===== L2 变更集提议表单 ===== */
-.changeset-propose {
+.change-item {
+  padding: 6px 8px;
+  border: 1px solid var(--border-color, #dfe5de);
+  border-radius: 6px;
+  background: var(--bg-card, #fff);
   display: flex;
   flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+/* 收起态头部（整行可点展开）：chevron + HG + 状态 + 人话摘要 */
+.change-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: 0;
+  padding: 2px 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.change-head .chevron {
+  flex: none;
+  padding: 0 2px;
+}
+
+.change-ref {
+  flex: none;
+  font-family: monospace;
+  font-weight: 700;
+  font-size: 11px;
+  color: var(--primary, #3d7a5c);
+}
+
+.change-status {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.change-status.applied { background: #e7f1ec; color: #2f6e50; }
+.change-status.partial { background: #fffaeb; color: #b45309; }
+.change-status.rolled_back { background: #eef2f6; color: #5a6b7a; }
+.change-status.rollback_failed { background: #fef2f2; color: #b42318; }
+
+.change-summary {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-primary, #242e27);
+}
+
+/* 展开区：改前/改后两列快照 + 完整 SQL + 来龙去脉 */
+.change-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 2px 2px;
+  border-top: 1px dashed var(--border-color, #dfe5de);
+}
+
+.snap-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
 }
-.changeset-propose select,
-.changeset-propose textarea {
-  width: 100%;
-  font: inherit;
-  font-size: 12px;
+
+.snap-col { min-width: 0; }
+
+.snap-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted, #5f6e66);
+  margin-bottom: 3px;
+}
+
+.snap-row {
+  display: flex;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  min-width: 0;
+}
+
+.snap-key {
+  flex: none;
+  color: var(--text-muted, #5f6e66);
+}
+
+.snap-val {
+  min-width: 0;
+  word-break: break-all;
+}
+
+.snap-empty {
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.change-sql-full {
+  margin: 0;
+  font-family: monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  background: rgba(127, 127, 127, 0.1);
+  border-radius: 4px;
   padding: 6px 8px;
-  border: 1px solid var(--border, #dbe4de);
-  border-radius: 6px;
-  background: var(--surface, #fff);
-  color: inherit;
-  resize: vertical;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.change-origin {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted, #5f6e66);
+  line-height: 1.5;
+}
+
+.change-err {
+  margin: 0;
+  font-size: 11px;
+  color: #b42318;
+}
+
+.rollback-btn {
+  align-self: flex-start;
+  border: 1px solid #d29922;
+  background: transparent;
+  color: #b45309;
+  border-radius: 5px;
+  padding: 2px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.rollback-btn:hover { background: #fffaeb; }
+
+/* 事件分组下的嵌套会话条目：缩进表达层级（ZCode 分组式） */
+.session-item.nested {
+  margin-left: 16px;
 }

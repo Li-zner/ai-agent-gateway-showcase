@@ -5,6 +5,8 @@ export interface UserProfile {
   username: string
   phone: string
   role: string
+  /** 能力允许清单（子账号；admin 恒全，恒为空数组由前端按 role 判） */
+  permissions: string[]
   display_name: string
   email: string
   quota_limited: boolean

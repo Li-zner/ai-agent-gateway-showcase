@@ -41,12 +41,13 @@ function latestUserContent(session: ChatSession): string {
   return message?.content ?? ''
 }
 
-/** 自动标题随画像刷新；手动重命名后不再覆盖。 */
+/** 自动标题仅在首轮确定一次并冻结；手动重命名后不再覆盖。 */
 function refreshAutoTitle(session: ChatSession, query = ''): void {
-  if (session.titleMode === 'manual') return
+  if (session.titleMode === 'manual' || session.titleLocked) return
   const source = query.trim() || latestUserContent(session)
   if (!source) return
   session.title = conversationTitle(source, session.profile)
+  session.titleLocked = true
 }
 
 /** 组装本轮用户与助手消息，返回服务端查询和响应式助手引用。 */
@@ -331,6 +332,8 @@ export const useChatStore = defineStore('chat', {
     },
 
     newConversation() {
+      // 已在新会话（未使用、无消息）时维持现状，重复点击不再新建空会话（对齐 dbagentSessions 定稿行为）
+      if (this.currentSession?.messages.length === 0) return
       this.createSession()
     },
 

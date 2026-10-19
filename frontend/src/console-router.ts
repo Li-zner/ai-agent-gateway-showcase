@@ -15,6 +15,7 @@ const consoleRouter = createRouter({
     { path: '/', component: () => import('./views/RagOpsChatView.vue') },
     { path: '/admin/rag/chat', component: () => import('./views/RagOpsChatView.vue') },
     { path: '/admin/rag', component: () => import('./views/RagConsoleView.vue') },
+    { path: '/dbagent', redirect: '/admin/rag/chat' },
     { path: '/login', component: () => import('./views/ConsoleLoginView.vue') },
   ],
 })

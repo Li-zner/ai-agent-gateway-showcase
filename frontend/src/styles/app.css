@@ -142,7 +142,6 @@
         box-shadow: 0 0 0 4px rgba(91,91,214,0.12) !important;
     }
     body[data-theme="glass"] .wallet-btn,
-    body[data-theme="glass"] .logout-btn,
     body[data-theme="glass"] .map-btn {
         backdrop-filter: blur(8px);
         -webkit-backdrop-filter: blur(8px);
@@ -227,14 +226,12 @@
         color: #f1f5f9;
     }
     body[data-theme="dark"] .wallet-btn,
-    body[data-theme="dark"] .logout-btn,
     body[data-theme="dark"] .map-btn {
         background: #1e293b !important;
         border-color: #334155 !important;
         color: #94a3b8 !important;
     }
     body[data-theme="dark"] .wallet-btn:hover,
-    body[data-theme="dark"] .logout-btn:hover,
     body[data-theme="dark"] .map-btn:hover {
         border-color: #06b6d4 !important;
         color: #06b6d4 !important;
@@ -300,23 +297,6 @@
     }
     body[data-theme="dark"] .tx-filter-btn {
         border-color: #334155 !important;
-    }
-
-    /* ---------- 主题切换器（侧边栏/移动端面板）---------- */
-    .theme-btn-pc.active, .theme-btn-mb.active {
-        background: var(--primary) !important;
-        color: #fff !important;
-        border-color: var(--primary) !important;
-    }
-    body[data-theme="dark"] .theme-btn-pc.active,
-    body[data-theme="dark"] .theme-btn-mb.active {
-        background: var(--primary) !important;
-        color: #fff !important;
-        border-color: var(--primary) !important;
-    }
-    .theme-btn-pc:hover, .theme-btn-mb:hover {
-        border-color: var(--primary) !important;
-        color: var(--primary) !important;
     }
 
     /* ---------- CSS 变量 & 全局重置（与 classic 主题同步的兜底） ---------- */
@@ -473,13 +453,6 @@
     }
     .header-actions { display: flex; align-items: center; gap: 12px; }
     .header-left { display: flex; align-items: center; gap: 12px; }
-
-    .logout-btn {
-        background: none; border: 1px solid var(--border-color); color: var(--text-secondary);
-        padding: 6px 16px; border-radius: 30px; font-size: 13px; cursor: pointer;
-        transition: var(--transition);
-    }
-    .logout-btn:hover { background: var(--bg-body); border-color: var(--text-muted); }
 
     /* ---------- 地图入口按钮（头部） ---------- */
     .map-btn {
@@ -1167,7 +1140,6 @@
         .chat-input-area button { min-width: 56px; padding: 10px 16px; font-size: 14px; height: 44px; min-height: 44px; }
 
         .mobile-menu-btn { display: block; }
-        .logout-btn { font-size: 12px; padding: 4px 12px; }
         .map-btn { display: none; }
         .mode-badge { font-size: 11px; padding: 2px 14px; }
 
@@ -1184,7 +1156,6 @@
         .header-actions { gap: 4px; }
         .file-indicator { margin: 2px 8px 0; font-size: 11px; }
         .file-indicator span { max-width: 80px; }
-        .theme-btn-pc { font-size: 11px !important; padding: 5px 0 !important; }
     }
 
 /* ---------- Vue 挂载适配 ---------- */

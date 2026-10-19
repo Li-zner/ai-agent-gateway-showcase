@@ -17,6 +17,27 @@ from ..core.metrics import safety_filter_timeout_total
 logger = setup_logging()
 
 # ============================================================
+# 模型控制标记剥离（2026-10-15 公网 bug：思考/回答泄露 <|DSML|> 伪工具调用骨架）
+# 思考模型偶发把内部函数调用以特殊控制 token 序列化吐进 reasoning/content；
+# 这类 <|...|> / <｜...｜> 是模型侧标记，正常回答与思考都不该出现，出现即剥除。
+# 内层排除竖线与尖括号并限长，防跨整段贪婪匹配与回溯爆炸。
+# 只剥控制标记，不动 ```/~~~ 代码围栏（合法回答可能含围栏，剥它会破坏正文）。
+# ============================================================
+_CONTROL_TOKEN_RE = re.compile(r"<[\|｜][^|｜<>]{0,40}[\|｜]>")
+
+
+def has_control_token(text: str) -> bool:
+    """是否含模型控制标记（<|...|> / <｜...｜>）：思考命中即视为伪工具调用整段抑制。"""
+    return bool(text) and _CONTROL_TOKEN_RE.search(text) is not None
+
+
+def strip_control_tokens(text: str) -> str:
+    """剥除文本中的模型控制标记，保留其余可见正文（回答出口用，宁可留字不误删）。"""
+    if not text:
+        return text
+    return _CONTROL_TOKEN_RE.sub("", text)
+
+# ============================================================
 # 内置敏感词库（按需增删）
 # ============================================================
 _BUILTIN_SENSITIVE_WORDS = [

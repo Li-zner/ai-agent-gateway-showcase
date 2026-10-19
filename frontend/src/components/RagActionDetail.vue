@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 修复动作审计详情：策略、基线、验证和回滚时间线。 */
 import { computed, ref } from 'vue'
-import { rollbackRagAction, type RagAction } from '../api/ragAdmin'
+import { checkRagAction, rollbackRagAction, type RagAction } from '../api/ragAdmin'
 import { label_risk, label_status } from '../utils/ragLabels'
 
 const props = defineProps<{
@@ -15,9 +15,18 @@ const emit = defineEmits<{
 
 const rollbackBusy = ref(false)
 const rollbackError = ref('')
+const checkBusy = ref(false)
+const checkNote = ref('')
+const checkError = ref('')
+// 失败动作也要能点回滚：自动回滚失败（或执行异常）的动作停在 failed，快照若还在，
+// 这里就是它唯一的重试入口，口径与后端 rollback_action / rollback_available 一致。
 const canRollback = computed(
-  () => props.action.rollback_available && props.action.status === 'succeeded',
+  () => props.action.rollback_available
+    && (props.action.status === 'succeeded' || props.action.status === 'failed'),
 )
+// 没有留档原值时回滚器恒 skipped，状态永远停在 failed——这条通道给它一个终点：
+// 人工核对过实际数据后标记「已核对」，只落状态与说明，不改动任何数据。
+const canCheck = computed(() => props.action.status === 'failed')
 
 const phaseLabels: Record<string, string> = {
   baseline: '执行前基线',
@@ -73,6 +82,27 @@ async function rollbackAction(): Promise<void> {
     rollbackError.value = err instanceof Error ? err.message : '回滚失败'
   } finally {
     rollbackBusy.value = false
+  }
+}
+
+/** 人工核对后终结这条失败动作；说明必填，会一并写进审计。 */
+async function checkAction(): Promise<void> {
+  const note = checkNote.value.trim()
+  if (!canCheck.value || checkBusy.value || !note) return
+  const confirmed = window.confirm(
+    `确认将动作 #${props.action.action_id} 标记为已核对？这只记录你的核对结论，不会改动任何数据。`,
+  )
+  if (!confirmed) return
+  checkBusy.value = true
+  checkError.value = ''
+  try {
+    await checkRagAction(props.action.action_id, note)
+    checkNote.value = ''
+    emit('refresh')
+  } catch (err) {
+    checkError.value = err instanceof Error ? err.message : '标记失败'
+  } finally {
+    checkBusy.value = false
   }
 }
 </script>
@@ -144,6 +174,10 @@ async function rollbackAction(): Promise<void> {
       <h3>回滚</h3>
       <p>{{ action.rollback_plan || '未定义' }}</p>
       <pre v-if="Object.keys(action.rollback_result || {}).length">{{ fmtJson(action.rollback_result) }}</pre>
+      <p v-if="action.status === 'failed'">
+        该动作执行失败：有留档原值时按原值恢复；没有留档原值时不会改动任何数据，
+        动作仍保持失败，请人工核对实际状态。
+      </p>
       <button
         v-if="canRollback"
         class="rollback-button"
@@ -153,6 +187,25 @@ async function rollbackAction(): Promise<void> {
         {{ rollbackBusy ? '正在回滚' : '回滚此动作' }}
       </button>
       <p v-if="rollbackError" class="error">{{ rollbackError }}</p>
+      <div v-if="canCheck" class="check-block">
+        <p>
+          这条动作已经无法由系统撤销。请先核对实际数据（必要时手工改回），
+          再在此标记「已核对」结束它；填写的说明会写入审计日志。
+        </p>
+        <input
+          v-model="checkNote"
+          maxlength="500"
+          placeholder="核对说明，例如：已手工恢复渠道开关"
+        />
+        <button
+          class="check-button"
+          :disabled="checkBusy || !checkNote.trim()"
+          @click="checkAction"
+        >
+          {{ checkBusy ? '正在标记' : '标记为已核对' }}
+        </button>
+        <p v-if="checkError" class="error">{{ checkError }}</p>
+      </div>
     </section>
 
     <dl class="timeline-meta">
@@ -210,6 +263,9 @@ pre {
 .error { color: #b42318; font-size: 12px; }
 .rollback-button { margin-top: 10px; }
 .rollback-button:disabled { cursor: wait; opacity: 0.6; }
+.check-block { margin-top: 12px; }
+.check-block input { width: 100%; max-width: 420px; margin-bottom: 8px; }
+.check-button:disabled { cursor: not-allowed; opacity: 0.6; }
 .text-button {
   border: 0;
   background: transparent;

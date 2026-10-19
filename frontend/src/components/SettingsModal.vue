@@ -1,15 +1,19 @@
 <script setup lang="ts">
-/** 设置弹窗：账号 / 修改密码 / 语言（GLM 网页版风格：分区卡片 + 浅底输入 + 主色 CTA） */
+/** 设置弹窗：账号 / 修改密码 / 语言 / 退出（退出与主题入口从主界面收敛至此） */
 import { ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { changePassword } from '../api/user'
 import { setLocale } from '../locales'
 import { useAuthStore } from '../stores/auth'
+import { useChatStore } from '../stores/chat'
 import { useUiStore } from '../stores/ui'
 import { Theme } from '../enums'
 
 const { t, locale } = useI18n()
+const router = useRouter()
 const auth = useAuthStore()
+const chat = useChatStore()
 const ui = useUiStore()
 
 const oldPwd = ref('')
@@ -18,6 +22,8 @@ const confirmPwd = ref('')
 const msg = ref('')
 const msgOk = ref(false)
 const busy = ref(false)
+/** 修改密码分区折叠态：默认收起，点按钮才展开具体输入 */
+const pwdExpanded = ref(false)
 
 async function save() {
   msg.value = ''
@@ -50,6 +56,14 @@ async function save() {
   }
 }
 
+async function logout() {
+  // 与原 ChatView doLogout 同语义：先取消进行中的流式再清身份，避免后台 SSE 继续写已登出的 store
+  await chat.cancelAndWait()
+  await auth.logout()
+  ui.closeSettings()
+  router.push('/login')
+}
+
 function pickTheme(theme: string) {
   ui.setTheme(theme as Theme)
 }
@@ -68,25 +82,30 @@ function pickTheme(theme: string) {
         <button class="s-close" @click="ui.closeSettings()">✕</button>
       </header>
 
-      <!-- 修改密码分区 -->
+      <!-- 修改密码分区：默认折叠，点按钮才展开具体输入 -->
       <section class="s-section">
-        <h4 class="s-section-title">{{ t('change_password') }}</h4>
-        <div class="s-field">
-          <label>{{ t('current_password') }}</label>
-          <input v-model="oldPwd" type="password" autocomplete="current-password">
-        </div>
-        <div class="s-field">
-          <label>{{ t('new_password') }}</label>
-          <input v-model="newPwd" type="password" autocomplete="new-password">
-        </div>
-        <div class="s-field">
-          <label>{{ t('confirm_password') }}</label>
-          <input v-model="confirmPwd" type="password" autocomplete="new-password">
-        </div>
-        <p v-if="msg" class="s-msg" :class="{ ok: msgOk }">{{ msg }}</p>
-        <button class="s-primary-btn" :disabled="busy" @click="save">
-          {{ busy ? t('pwd_loading') : t('save_password') }}
+        <button v-if="!pwdExpanded" class="s-row-btn" @click="pwdExpanded = true">
+          {{ t('change_password') }}
         </button>
+        <template v-else>
+          <h4 class="s-section-title">{{ t('change_password') }}</h4>
+          <div class="s-field">
+            <label>{{ t('current_password') }}</label>
+            <input v-model="oldPwd" type="password" autocomplete="current-password">
+          </div>
+          <div class="s-field">
+            <label>{{ t('new_password') }}</label>
+            <input v-model="newPwd" type="password" autocomplete="new-password">
+          </div>
+          <div class="s-field">
+            <label>{{ t('confirm_password') }}</label>
+            <input v-model="confirmPwd" type="password" autocomplete="new-password">
+          </div>
+          <p v-if="msg" class="s-msg" :class="{ ok: msgOk }">{{ msg }}</p>
+          <button class="s-primary-btn" :disabled="busy" @click="save">
+            {{ busy ? t('pwd_loading') : t('save_password') }}
+          </button>
+        </template>
       </section>
 
       <!-- 偏好分区：主题 + 语言 -->
@@ -106,6 +125,11 @@ function pickTheme(theme: string) {
           <button :class="{ active: locale === 'zh' }" @click="setLocale('zh')">中文</button>
           <button :class="{ active: locale === 'en' }" @click="setLocale('en')">English</button>
         </div>
+      </section>
+
+      <!-- 退出分区：主界面右上/左下退出入口收敛至此 -->
+      <section class="s-section">
+        <button class="s-logout-btn" @click="logout">{{ t('nav_logout') }}</button>
       </section>
     </div>
   </div>
@@ -269,6 +293,37 @@ export default { data() { return { themes } } }
 }
 .s-msg.ok { color: #00b42a; }
 .s-msg:not(.ok) { color: #f53f3f; }
+.s-row-btn {
+  width: 100%;
+  height: 44px;
+  border: 1px solid #e5e6eb;
+  border-radius: 8px;
+  background: #f7f8fa;
+  color: #1f2329;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+}
+.s-row-btn:hover {
+  border-color: var(--primary, #3d7a5c);
+  color: var(--primary, #3d7a5c);
+}
+.s-logout-btn {
+  width: 100%;
+  height: 40px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #f53f3f;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.s-logout-btn:hover {
+  background: #fef2f2;
+}
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }

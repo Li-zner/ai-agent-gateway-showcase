@@ -65,7 +65,10 @@ async def prepare_generation(task_id, username, user_query, mm,
     from . import runner as R  # 晚绑定：测试对 runner 模块属性的 monkeypatch 生效
     persona_id, lang = params["persona_id"], params["lang"]
     _cache_ctx, cacheable = await getattr(R, "_build_cache_ctx")(
-        mm, username, persona_id, user_query, lang)
+        mm, username, persona_id, user_query, lang,
+        file_ids=params.get("file_ids"),      # L1：带文件不吃缓存（对齐流式路）
+        user_perms=params.get("user_perms"),  # L5：权限维度进缓存键
+    )
     # 即便未进缓存闸（cacheable=False），ctx 也要留给 finally 的统一清理。
     cache_state[0], cache_state[1] = _cache_ctx, cacheable
     if not await getattr(R, "update_status")(task_id, "generating"):

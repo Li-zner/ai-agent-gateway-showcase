@@ -51,19 +51,12 @@ class _LRUCache:
 # 全局热缓存实例（默认 TTL 从 config 读取，P1 去硬编码）
 _hot_cache = _LRUCache(capacity=256, default_ttl=CACHE_L0_TTL)
 
-# 释放重建锁的 Lua（仅持有者能删，防误删）
-_RELEASE_LUA = """
-if redis.call("get", KEYS[1]) == ARGV[1] then
-    return redis.call("del", KEYS[1])
-else
-    return 0
-end
-"""
-
 
 def _hot_ttl() -> int:
-    """随机过期时间（300-900s）：错开失效时刻，防缓存雪崩"""
-    return random.randint(300, 900)
+    """随机过期时间：以 CACHE_L0_TTL 为中心 ±50% 抖动（默认 600 → 300-900），
+    错开失效时刻防缓存雪崩。2026-09-30 校准修复（B2）：原先硬编码
+    randint(300, 900)，CACHE_L0_TTL 成死旋钮——改 env 无感。"""
+    return random.randint(int(CACHE_L0_TTL * 0.5), int(CACHE_L0_TTL * 1.5))
 
 
 def _cache_l0_key(query: str, cache_ctx: str = "") -> str:
@@ -79,8 +72,8 @@ class SemanticCache:
     def build_cache_ctx(username: str = "", persona_id: str = "",
                         user_profile: str = "", conversation_id: str = "",
                         user_query: str = "", lang: str = "",
-                        model: str = "") -> str:
-        """构建语义缓存上下文维度（用户|人格|画像指纹|会话指纹|旅游约束|语言|模型）
+                        model: str = "", user_perms=None) -> str:
+        """构建语义缓存上下文维度（用户|人格|画像指纹|会话指纹|旅游约束|语言|模型|权限）
 
         背景（Bug #1）：缓存按 query 建键，而回答会注入人格/画像等个性化上下文，
         导致 A 用户的个性化回答被缓存命中给 B 用户。
@@ -98,16 +91,23 @@ class SemanticCache:
         2026-09-19 审查 core P2-5：再补语言与模型两个维度——同一条 query 文本在
         zh/en 界面指令下答案语言不同，缺 lang 会互相命中；换主模型后旧模型的答案
         也会继续命中。两者非 PII，明文并入键尾便于排障。
+
+        2026-09-28 L5：补权限维度——检索按 user_perms 过滤（public/vip），键里
+        没有它的话用户升级 vip 后 60 天内仍命中升级前按公开权限生成的回答。
+        perms 排序后取指纹（顺序无关）；缺省 None 视同空权限。键尾全量变化使
+        既有缓存行自然失联（60 天维护清理兜底），代价一次性。
         """
         user_fp = hashlib.sha256((username or "").encode("utf-8")).hexdigest()[:16]
         profile_fp = hashlib.sha256((user_profile or "").encode("utf-8")).hexdigest()[:16]
         conv_fp = hashlib.sha256((conversation_id or "").encode("utf-8")).hexdigest()[:16]
+        perms_fp = hashlib.sha256(
+            ",".join(sorted(user_perms or [])).encode("utf-8")).hexdigest()[:16]
         base = f"{user_fp}|{persona_id or ''}|{profile_fp}|{conv_fp}"
         force_travel = "travel" in (persona_id or "").lower() or "旅游" in (persona_id or "")
         constraint_fp = travel_constraint_fingerprint(user_query, force=force_travel)
         if constraint_fp:
             base = f"{base}|{constraint_fp}"
-        return f"{base}|{lang or ''}|{model or ''}"
+        return f"{base}|{lang or ''}|{model or ''}|{perms_fp}"
 
     @staticmethod
     async def get(query: str, cache_ctx: str = ""):
@@ -198,15 +198,17 @@ class SemanticCache:
         if response is None or not str(response).strip():
             logger.info(f"缓存写入跳过（空响应）: {query[:30]}...")
             return
-        # 防止把兜底/错误回复写入缓存
-        from ..core.config import DEEPSEEK_FALLBACK_MESSAGE
-        if str(response).strip() == DEEPSEEK_FALLBACK_MESSAGE:
+        # 防止把兜底/错误回复写入缓存。兜底文案已按语言分中英两版（A 方案本地化），
+        # 单值 == 比较会漏掉英文版 → 英文兜底被钉进缓存 60 天，故改为"命中任一变体即跳过"。
+        from ..core.config import FALLBACK_MESSAGE_VARIANTS
+        if str(response).strip() in FALLBACK_MESSAGE_VARIANTS:
             logger.info(f"缓存写入跳过（兜底回复）: {query[:30]}...")
             return
         # DFA 拦截的安全文案不写入（2026-09-09 审查 P1）：一次误伤即把该 query 钉成
-        # 固定安全文案 60 天（命中计数累加还会躲过 clean_stale_cache），五处调用点在此单点收口
-        from .safety_filter import get_filter
-        if str(response).strip() == get_filter().safe_message:
+        # 固定安全文案 60 天（命中计数累加还会躲过 clean_stale_cache），五处调用点在此单点收口。
+        # 同理按变体集合判定：中文 get_filter().safe_message 与英文 SAFETY_FILTER_MESSAGE_EN 都要拦。
+        from ..core.config import SAFETY_MESSAGE_VARIANTS
+        if str(response).strip() in SAFETY_MESSAGE_VARIANTS:
             logger.info(f"缓存写入跳过（安全拦截文案）: {query[:30]}...")
             return
 
@@ -262,10 +264,21 @@ class SemanticCache:
         """判断缓存值是否为穿透占位"""
         return response is not None and str(response) == "__EMPTY__"
 
-    # ===== 防击穿：互斥重建锁 =====
+    # ===== 防击穿：互斥重建锁（2026-09-30 由 Redis SETNX 改进程内实现） =====
     # 缓存未命中后，同一 query 并发时只允许一个请求调用 LLM 重建，
     # 其余请求等待后重读（可能命中刚写入的缓存）。锁带 TTL 自愈，
     # 避免重建方异常退出导致死锁。
+    #
+    # ponytail: 进程内 dict 只在单 worker 内互斥——生产是单容器单 uvicorn
+    # worker（deploy/ecs/docker-compose.yml 无 --workers 参数），语义成立，
+    # 且 Redis 故障时锁仍可用。此前锁走 Redis 且 fail-closed：Redis 挂 =
+    # 全站问答拒答"服务繁忙"，与缓存查询 fail-open（chat_stream_core:198）
+    # 和限流四闸 fail-open 的哲学相悖。扩多副本/多 worker 时把这三个方法
+    # 换回 Redis SETNX 实现，调用方签名不变。
+    # 过期条目在下次同 key acquire 时被覆写；再无人访问的 key 留下小 tuple，
+    # 上限 = 历史 distinct query 数，可接受。
+    _REBUILD_LOCKS: dict = {}  # key -> (token, expires_at[time.monotonic()])
+
     @staticmethod
     def _lock_key(query: str, cache_ctx: str = "") -> str:
         """重建锁键：query + 上下文维度（防跨上下文串锁；与缓存键同构）"""
@@ -273,33 +286,40 @@ class SemanticCache:
 
     @staticmethod
     async def acquire_rebuild_lock(query: str, cache_ctx: str = "", ttl: int = 45) -> Optional[str]:
-        """尝试获取重建锁；成功返回 token，已有重建进行中返回 None"""
-        r = await get_redis()
+        """尝试获取重建锁；成功返回 token，已有重建进行中返回 None
+
+        读-判-写全程无 await，单线程事件循环内天然原子，无需再加锁。
+        """
+        key = SemanticCache._lock_key(query, cache_ctx)
+        now = time.monotonic()
+        entry = SemanticCache._REBUILD_LOCKS.get(key)
+        if entry is not None and entry[1] > now:
+            return None  # 他人持有且未过期
         token = uuid.uuid4().hex
-        ok = await r.set(SemanticCache._lock_key(query, cache_ctx), token, nx=True, ex=ttl)
-        return token if ok is True else None
+        SemanticCache._REBUILD_LOCKS[key] = (token, now + ttl)
+        return token
 
     @staticmethod
     async def release_rebuild_lock(query: str, token: str, cache_ctx: str = ""):
         """释放重建锁（仅持有者能释放，防误删）"""
         if not token:
             return
-        r = await get_redis()
-        await r.eval(_RELEASE_LUA, 1, SemanticCache._lock_key(query, cache_ctx), token)
+        key = SemanticCache._lock_key(query, cache_ctx)
+        entry = SemanticCache._REBUILD_LOCKS.get(key)
+        if entry is not None and entry[0] == token:
+            del SemanticCache._REBUILD_LOCKS[key]
 
     @staticmethod
     async def renew_rebuild_lock(query: str, token: str, cache_ctx: str = "", ttl: int = 45) -> bool:
         """续期重建锁（仅持有者可续；长任务重建中周期调用，防锁超时导致击穿，P0 #50）"""
         if not token:
             return False
-        r = await get_redis()
-        # Lua：仅当仍是本 token 持有才续期，返回 1 表示续期成功
-        lua = (
-            "if redis.call('get', KEYS[1]) == ARGV[1] then "
-            "return redis.call('expire', KEYS[1], ARGV[2]) else return 0 end"
-        )
-        res = await r.eval(lua, 1, SemanticCache._lock_key(query, cache_ctx), token, ttl)
-        return res == 1
+        key = SemanticCache._lock_key(query, cache_ctx)
+        entry = SemanticCache._REBUILD_LOCKS.get(key)
+        if entry is None or entry[0] != token or entry[1] <= time.monotonic():
+            return False
+        SemanticCache._REBUILD_LOCKS[key] = (token, time.monotonic() + ttl)
+        return True
 
 
 # 模块级别名：兼容以 `from .semantic_cache import build_cache_ctx` 形式的外部导入

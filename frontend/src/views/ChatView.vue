@@ -189,12 +189,6 @@ async function doSend() {
   void refreshBalance()
 }
 
-async function doLogout() {
-  await chat.cancelAndWait()
-  await auth.logout()
-  router.push('/login')
-}
-
 function newConversation() {
   chat.newConversation()
   uploads.value = []
@@ -233,12 +227,6 @@ function switchPersona(id: string) {
   chat.switchPersona(id)
 }
 
-const themes = [
-  { key: 'classic', label: 'theme_classic' },
-  { key: 'glass', label: 'theme_glass' },
-  { key: 'dark', label: 'theme_dark' },
-]
-
 /** 预设问题 / 追问建议直发（不经 input 框） */
 async function send(q: string) {
   await chat.send(q)
@@ -272,25 +260,9 @@ async function send(q: string) {
       <div class="history-label">{{ t('history_label') }}</div>
       <SessionList />
 
-      <!-- 主题 -->
-      <div class="sidebar-section">
-        <div class="section-label">{{ t('theme_label') }}</div>
-        <div class="theme-picker">
-          <button
-            v-for="th in themes"
-            :key="th.key"
-            class="theme-btn-pc"
-            :class="{ active: ui.theme === th.key }"
-            @click="ui.setTheme(th.key as never)"
-          >{{ t(th.label) }}</button>
-        </div>
-      </div>
-
       <div class="sidebar-footer">
         <div>{{ t('sessions_saved_local') }}</div>
         <button @click="ui.openSettings()">{{ t('settings') }}</button>
-        <!-- 退出入口：移动端 header 无退出按钮，收在此处 -->
-        <button @click="doLogout">{{ t('nav_logout') }}</button>
       </div>
     </aside>
 
@@ -317,7 +289,6 @@ async function send(q: string) {
             class="mode-btn mode-dd-trigger"
             @click.stop="ddOpen = !ddOpen"
           >{{ personaLabel }}<span class="dd-caret">▾</span></button>
-          <button class="logout-btn" @click="doLogout">{{ t('nav_logout') }}</button>
         </div>
       </div>
       <!-- 人格下拉：挂 zone 层（chat-header 的 overflow:hidden 会裁剪菜单致手机端点不到） -->

@@ -46,24 +46,8 @@ def remaining_questions(user: dict) -> int:
     return max(0, GITHUB_QUESTION_LIMIT - (user.get("used_requests") or 0))
 
 
-async def inc_used_questions(username: str) -> None:
-    """受限用户提问次数 +1（带上限条件原子自增，防并发超限）；失败不影响主流程"""
-    try:
-        pool = await get_pool()
-        async with pool.acquire(timeout=5) as conn:
-            # 原子：仅当未达上限时才自增，DB 层保证并发下不会超限（P0 #62）
-            result = await conn.execute(
-                "UPDATE users SET used_requests = used_requests + 1, updated_at = CURRENT_TIMESTAMP "
-                "WHERE username = $1 AND quota_limited = TRUE AND role != 'admin' "
-                "AND used_requests < $2",
-                username, GITHUB_QUESTION_LIMIT,
-            )
-            # 实际自增才失效缓存：额度判断读的是 auth.get_cached_user 的 5 分钟缓存，
-            # 不失效的话窗口内所有请求都拿到旧计数，试用上限可被无限突破（P1 修复）
-            if result and result != "UPDATE 0":
-                await invalidate_user_cache(username)
-    except Exception as e:
-        logger.warning(f"GitHub 试用额度累计失败（不影响对话）: {e}")
+# inc_used_questions 已删（2026-09-29 app 扫描）：reserve_used_questions 准入预留
+# 模式落地后全仓零调用方，完成后累计的旧口径成死码——删除优于保留（ponytail）。
 
 
 async def reserve_used_questions(user: dict) -> bool:

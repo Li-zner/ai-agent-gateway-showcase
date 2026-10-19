@@ -5,6 +5,7 @@ import RagConsoleView from '../src/views/RagConsoleView.vue'
 import {
   approveRagAction,
   cancelRagAction,
+  checkRagAction,
   getRagAction,
   getRagIncident,
   getRagIncidentRecommendations,
@@ -33,6 +34,7 @@ vi.mock('../src/api/ragAdmin', () => ({
   acknowledgeIncident: vi.fn(),
   approveRagAction: vi.fn(),
   cancelRagAction: vi.fn(),
+  checkRagAction: vi.fn(),
   getRagAction: vi.fn(),
   getRagIncident: vi.fn(),
   getRagIncidentRecommendations: vi.fn(),
@@ -352,6 +354,57 @@ describe('RagConsoleView 概览与详情', () => {
 
     expect(window.confirm).toHaveBeenCalled()
     expect(rollbackRagAction).toHaveBeenCalledWith(1)
+    expect(getRagAction).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('执行失败且可回滚的动作同样给回滚入口（自动回滚失败的唯一重试通道）', async () => {
+    const failedAction = {
+      ...action,
+      status: 'failed',
+      rollback_available: true,
+    }
+    vi.mocked(listRagActions).mockResolvedValue({ items: [failedAction] })
+    vi.mocked(getRagAction).mockResolvedValue(failedAction)
+    vi.mocked(rollbackRagAction).mockResolvedValue(failedAction)
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(RagConsoleView)
+    await flushPromises()
+    await wrapper.findAll('.tabs button')[3].trigger('click')
+    await wrapper.find('.table-panel tbody tr').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('该动作执行失败')
+    await wrapper.get('.rollback-button').trigger('click')
+    await flushPromises()
+
+    expect(window.confirm).toHaveBeenCalled()
+    expect(rollbackRagAction).toHaveBeenCalledWith(1)
+    expect(getRagAction).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('无法由系统撤销的失败动作可人工核对终结（说明必填，不改动数据）', async () => {
+    const failedAction = { ...action, status: 'failed', rollback_available: false }
+    const checkedAction = { ...failedAction, status: 'checked' }
+    vi.mocked(listRagActions).mockResolvedValue({ items: [failedAction] })
+    vi.mocked(getRagAction).mockResolvedValueOnce(failedAction)
+    vi.mocked(checkRagAction).mockResolvedValue(checkedAction)
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(RagConsoleView)
+    await flushPromises()
+    await wrapper.findAll('.tabs button')[3].trigger('click')
+    await wrapper.find('.table-panel tbody tr').trigger('click')
+    await flushPromises()
+
+    // 说明没填不许点：终结等于由人来担保这条动作的数据状态
+    expect(wrapper.get('.check-button').attributes('disabled')).toBeDefined()
+    await wrapper.find('.check-block input').setValue('  已手工恢复渠道开关  ')
+    await wrapper.get('.check-button').trigger('click')
+    await flushPromises()
+
+    expect(window.confirm).toHaveBeenCalled()
+    expect(checkRagAction).toHaveBeenCalledWith(1, '已手工恢复渠道开关')
     expect(getRagAction).toHaveBeenCalledTimes(2)
     wrapper.unmount()
   })

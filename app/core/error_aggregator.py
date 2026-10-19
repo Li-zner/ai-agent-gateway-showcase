@@ -4,7 +4,7 @@
 - 保留最近 N 条样本，供管理端查看（/api/admin/errors）
 - 只记录、不阻断：写入失败不影响主流程
 """
-from ..core.redis import get_redis
+from ..core.redis import get_redis, incr_arm_ttl
 from ..core.metrics import app_exceptions_total
 from ..core.logging import setup_logging
 from ..core.safety_filter import sanitize_error_text
@@ -25,7 +25,9 @@ async def record_error(request, exc: Exception) -> str:
     try:
         r = await get_redis()
         key = f"{_COUNT_PREFIX}{err_type}"
-        await r.incr(key)
+        # 计数与 TTL 一次原子下发（2026-10-08 第四轮 D1）：原先 INCR 与 EXPIRE 分两条
+        # 命令，中间被杀会留下无 TTL 的类型计数键，7 天窗口从此不再重开
+        await incr_arm_ttl(r, key, 7 * 86400)  # 计数保留 7 天
         # 原文 str(exc) 可能带完整 URL（高德 key 在参数里），入 Redis 前统一脱敏
         # （与任务状态/tool_result 的出口同一sanitize；2026-09-07 审查 P2）
         detail = sanitize_error_text(str(exc), fallback="(详情已脱敏)")[:200]
@@ -35,7 +37,6 @@ async def record_error(request, exc: Exception) -> str:
         )
         await r.ltrim(_RECENT_KEY, 0, _RECENT_LIMIT - 1)
         await r.expire(_RECENT_KEY, 7 * 86400)  # P3 修复：样本列表原先无 TTL
-        await r.expire(key, 7 * 86400)  # 计数保留 7 天
     except Exception as e:
         logger.warning(f"异常聚合写入失败（不影响主流程）: {e}")
     return err_type

@@ -19,7 +19,10 @@ _MAPPING_FILE = Path(__file__).parent.parent.parent / "tests" / "civil_supplemen
 _LAW_MAPPING_CACHE: Optional[list[dict]] = None
 
 # 映射表加载锁（P1 #8/#44：并发首次加载防重复读盘；防御未来 async 化）
-_LOAD_LOCK = threading.Lock()
+# 必须可重入（2026-10-07 C2/P1-4）：reload_mapping 持本锁后再调 _load_mapping，
+# 而那一刻缓存已被置 None，_load_mapping 会再次 acquire 同一把锁——
+# threading.Lock 非重入即同线程自死锁（09-08 pytest 收集挂死 5 分钟+ 的真根因）。
+_LOAD_LOCK = threading.RLock()
 
 
 def _load_mapping() -> list[dict]:
@@ -121,11 +124,11 @@ def check_query(query: str, threshold: float = 0.5) -> Optional[dict]:
     """
     检查用户问题是否与映射表中的法律误区匹配。
     如果匹配，返回对应的纠正信息；否则返回 None。
-    
+
     Args:
         query: 用户问题
         threshold: 匹配阈值（0~1），越高越严格
-    
+
     Returns:
         {
             "matched": True,
@@ -137,8 +140,15 @@ def check_query(query: str, threshold: float = 0.5) -> Optional[dict]:
         或 None（无匹配）
     """
     # 如果问题明确提到了「民法典」或具体法条编号，跳过映射表
-    #    避免将明确的民法典问题误归入其他法律
-    if "民法典" in query or re.search(r'第[0-9零一二三四五六七八九十百千]+条', query):
+    #    避免将明确的民法典问题误归入其他法律。
+    #    口径对齐（2026-09-28 agents 链审查 LM-R1）：裸"第X条"**不足以**判定民事——
+    #    routing_table 2026-09-06 就修过同款坑（"劳动合同法第39条"借裸条号绕过
+    #    黑名单），此处旧写法 `第[0-9零一…]+条` 让同一样例在映射表层再次旁路：
+    #    他法带条号的问题跳过纠正引导，直接流进民法典检索，召回不相关条文。
+    #    现要求"民法典/民法通则/民法总则"前缀紧跟条号才跳过。
+    if "民法典" in query or re.search(
+            r'(民法典|民法通则|民法总则)\s*第[一二三四五六七八九十百千零0-9]+[条编款]',
+            query):
         return None
 
     entries = _load_mapping()
@@ -180,7 +190,10 @@ def get_all_entries() -> list[dict]:
 
 
 def reload_mapping():
-    """重新加载映射表（用于热更新；锁保护防并发读到半清空状态，P1 #12）"""
+    """重新加载映射表（用于热更新；锁保护防并发读到半清空状态，P1 #12）
+
+    锁为 RLock：本函数持锁后再调 `_load_mapping`，同线程二次进入同一把锁（P1-4）。
+    """
     global _LAW_MAPPING_CACHE
     with _LOAD_LOCK:
         _LAW_MAPPING_CACHE = None

@@ -15,6 +15,7 @@ function profile(username: string) {
     username,
     phone: '',
     role: 'user',
+    permissions: [],
     display_name: username,
     email: '',
     quota_limited: false,

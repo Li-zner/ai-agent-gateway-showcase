@@ -138,6 +138,10 @@ export function refreshAccessToken(): Promise<boolean> {
   return tryRefresh()
 }
 
+/** 普通请求 30s 超时兜底（2026-09-30 校准修复 B4）：此前 fetch 无超时，挂死
+ * 接口无限等待——与 SSE 路径 60s 看门狗防御密度倒挂。上传走 upload() 的 120s。 */
+const DEFAULT_TIMEOUT_MS = 30_000
+
 async function doFetch(url: string, init: RequestInit, retried: boolean): Promise<Response> {
   const headers = new Headers(init.headers)
   const token = getAccessToken()
@@ -147,6 +151,8 @@ async function doFetch(url: string, init: RequestInit, retried: boolean): Promis
     ...init,
     headers,
     credentials: 'same-origin',
+    // 每次调用（含 401 刷新重试）新建 signal；调用方显式传入的优先
+    signal: init.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
   })
   if (resp.status === 401) {
     if (!retried && await tryRefresh()) {
@@ -190,9 +196,17 @@ export function post<T>(url: string, body?: unknown, headers?: Record<string, st
   })
 }
 
-/** 文件 multipart 上传 */
+export function put<T>(url: string, body?: unknown): Promise<T> {
+  return request<T>(url, {
+    method: 'PUT',
+    headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  })
+}
+
+/** 文件 multipart 上传（大文件/慢链路：120s，不吃默认 30s） */
 export function upload<T>(url: string, file: File): Promise<T> {
   const form = new FormData()
   form.append('file', file)
-  return request<T>(url, { method: 'POST', body: form })
+  return request<T>(url, { method: 'POST', body: form, signal: AbortSignal.timeout(120_000) })
 }

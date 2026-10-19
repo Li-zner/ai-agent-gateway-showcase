@@ -292,7 +292,7 @@ async def _call_deepseek_think(
     username: str = ""
 ) -> dict:
     """调用 DeepSeek 让 Agent '思考' 并返回 JSON（username 供扣费，主人拍板 09-09）"""
-    from ..services.chat_support import get_deepseek_key
+    from ..services.chat_support import attach_bill_uid, get_deepseek_key
     api_key = await get_deepseek_key()
     if not api_key:
         return {"error": "Missing DeepSeek Key"}
@@ -305,9 +305,9 @@ async def _call_deepseek_think(
         {"role": "user", "content": context}
     ]
 
-    from ..core.config import DEEPSEEK_MODEL, apply_llm_request_options
+    from ..core.config import LLM_PRIMARY_MODEL, apply_llm_request_options
     # 主力模型可能是 qwen（百炼端点），按模型名路由端点与密钥
-    base_url, api_key = llm_endpoint(DEEPSEEK_MODEL, api_key)
+    base_url, api_key = llm_endpoint(LLM_PRIMARY_MODEL, api_key)
     try:
         # 纳入全局 LLM 并发控制（2026-09-07 审查 P2）：Phase1/Phase2 并行 N 路调用
         # 原先绕过 llm_semaphore，圆桌讨论可瞬间占满全部 LLM 并发额度
@@ -317,11 +317,11 @@ async def _call_deepseek_think(
                     f"{base_url}/chat/completions",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                     json=apply_llm_request_options({
-                        "model": DEEPSEEK_MODEL,
+                        "model": LLM_PRIMARY_MODEL,
                         "messages": messages,
                         "response_format": {"type": "json_object"},
                         "temperature": temperature
-                    }, DEEPSEEK_MODEL)
+                    }, LLM_PRIMARY_MODEL)
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -329,21 +329,27 @@ async def _call_deepseek_think(
 
             # Token 计量
             from ..core.metrics import llm_tokens_total, llm_tokens_detail, llm_requests_total
-            usage = data.get("usage", {})
+            # 扣费幂等键（P1-②，2026-10-11）：本次即一次上游调用，一次一个键
+            usage = attach_bill_uid(data.get("usage")) or {}
             prompt_tk = usage.get('prompt_tokens', 0) or 0
             completion_tk = usage.get('completion_tokens', 0) or 0
             llm_tokens_total.labels(type='input').inc(prompt_tk)
             llm_tokens_total.labels(type='output').inc(completion_tk)
-            llm_tokens_detail.labels(model=DEEPSEEK_MODEL, endpoint=f'orchestrator_{phase}', type='input').inc(prompt_tk)
-            llm_tokens_detail.labels(model=DEEPSEEK_MODEL, endpoint=f'orchestrator_{phase}', type='output').inc(completion_tk)
-            llm_requests_total.labels(model=DEEPSEEK_MODEL, endpoint=f'orchestrator_{phase}', status='success').inc()
+            llm_tokens_detail.labels(model=LLM_PRIMARY_MODEL, endpoint=f'orchestrator_{phase}', type='input').inc(prompt_tk)
+            llm_tokens_detail.labels(model=LLM_PRIMARY_MODEL, endpoint=f'orchestrator_{phase}', type='output').inc(completion_tk)
+            llm_requests_total.labels(model=LLM_PRIMARY_MODEL, endpoint=f'orchestrator_{phase}', status='success').inc()
             # 计入计费（2026-09-09 主人拍板）：指标已打点，复用不含指标的扣费入口
             if username:
                 from ..services.llm_streaming import bill_token_usage
                 bill_token_usage(usage, username, "",
                                  remark=f"圆桌[{agent_id}.{phase}]消耗 {prompt_tk + completion_tk} tokens")
 
-            return json.loads(content)
+            parsed = json.loads(content)
+            if not isinstance(parsed, dict):
+                # json_object 模式仍可能吐合法 JSON 数组/标量；按解析失败同口径降级，
+                # 避免 run_phase1 的 result.get 把单 Agent 异常放大成整场圆桌异常
+                raise ValueError(f"LLM 返回非对象 JSON: {type(parsed).__name__}")
+            return parsed
     except json.JSONDecodeError as e:
         logger.warning(f"Agent {agent_id} {phase} JSON解析失败: {str(e)[:120]}")
         # 带 error 标记：调用方可区分"正常返回"与"降级"（P1 #9）

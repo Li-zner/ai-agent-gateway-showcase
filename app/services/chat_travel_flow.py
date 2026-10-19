@@ -16,6 +16,11 @@ logger = setup_logging()
 TRAVEL_AGENTS = ["query_weather", "query_hotel", "query_route", "query_food"]
 
 
+def _req_lang(ctx) -> str:
+    """从 ctx.req.lang 读界面语言；测试桩等缺 req 的上下文按 zh 兜底。"""
+    return getattr(getattr(ctx, "req", None), "lang", "zh") or "zh"
+
+
 def travel_intent_result(method: str) -> dict:
     """构造恢复后的旅行推荐意图，供闸门直接收口或继续跑四工具。"""
     return {
@@ -42,8 +47,11 @@ def next_missing_travel_slot(state: dict) -> str:
     return ""
 
 
-def build_travel_query(state: dict) -> str:
-    """把已确认目的地/出发地合成规范查询，工具参数同源且不重复澄清。"""
+def build_travel_query(state: dict, lang: str = "zh") -> str:
+    """把已确认目的地/出发地合成规范查询，工具参数同源且不重复澄清。
+
+    lang=="en" 时输出英文查询：否则中文模板会把英文界面用户又拽回中文回答。
+    """
     destination = str(state.get("destination") or "").strip()
     departure = str(state.get("departure") or "").strip()
     details = [
@@ -51,6 +59,20 @@ def build_travel_query(state: dict) -> str:
             state.get("days"), state.get("travelers"), state.get("budget"),
         ) if str(value or "").strip()
     ]
+    if lang == "en":
+        if destination:
+            query = f"Plan a trip from {departure} to {destination}."
+            if details:
+                query += f" Confirmed: {', '.join(details)}."
+            return query + (
+                " Please cover weather, transportation, attractions,"
+                " food and accommodation."
+            )
+        return (
+            f"Plan a trip departing from {departure}. Cover weather,"
+            " transportation, attractions, food and accommodation,"
+            " and keep the other preferences from the previous turn."
+        )
     if destination:
         query = f"从{departure}出发，去{destination}旅游。"
         if details:
@@ -62,8 +84,17 @@ def build_travel_query(state: dict) -> str:
     )
 
 
-def travel_clarification_message(state: dict) -> str:
-    """生成不含内部实现细节的槽位追问。"""
+def travel_clarification_message(state: dict, lang: str = "zh") -> str:
+    """生成不含内部实现细节的槽位追问。lang=="en" 时输出英文追问。"""
+    if lang == "en":
+        if state.get("missing_slot") == "destination":
+            return "Sure — which city or region would you like to travel to?"
+        destination = str(state.get("destination") or "").strip()
+        return (
+            f"Sure — for your trip to {destination}, where will you be"
+            " departing from? I'll then arrange weather, transportation,"
+            " attractions, food and accommodation together."
+        )
     if state.get("missing_slot") == "destination":
         return "可以，请先告诉我你想去哪个城市或地区旅游。"
     destination = str(state.get("destination") or "").strip()
@@ -176,7 +207,7 @@ async def apply_travel_memory(ctx: ChatStreamCtx, intent_result: dict) -> dict:
         if next_slot:
             ctx.travel_waiting_slot = True
             return travel_intent_result("travel_slot_memory")
-        ctx.user_query = build_travel_query(pending)
+        ctx.user_query = build_travel_query(pending, _req_lang(ctx))
         ctx.travel_pending_clear = True
         return travel_intent_result("travel_slot_memory")
 
@@ -192,10 +223,17 @@ async def travel_clarification_gate(ctx: ChatStreamCtx) -> AsyncIterator[str]:
         return
     setter = getattr(ctx.mm, "set_pending_travel", None)
     if callable(setter):
-        await setter(ctx.travel_pending)
+        # 断线取舍（2026-09-28 批1 P2-4 主人拍板）：**先落槽、后 yield [DONE]** 是
+        # 有意顺序——槽位是下一轮恢复对话的依据（丢了会重复追问，体感"失忆"），
+        # 澄清话术只是本轮展示文本，断线时保槽弃话是正确取舍。写槽失败也不得
+        # 阻断收口（与 persist_travel_slot 同一兜底语义），否则连 [DONE] 都发不出。
+        try:
+            await setter(ctx.travel_pending)
+        except Exception:
+            logger.exception("旅行待补槽写入失败（澄清话术照常收口）")
     # 本轮写入的是最新待补状态，不能被 finalize 当成"已消费"清掉。
     ctx.travel_pending_clear = False
-    message = travel_clarification_message(ctx.travel_pending)
+    message = travel_clarification_message(ctx.travel_pending, _req_lang(ctx))
     mark_route("travel_clarification")
     yield sse("answer_complete", message) + "data: [DONE]\n\n"
     # C-F11 不变式（chat_react._finalize_partial_answer 同一收口顺序，09-22 审阅 P1）：

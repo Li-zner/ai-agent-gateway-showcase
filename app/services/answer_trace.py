@@ -169,7 +169,10 @@ async def _persist(query: str, answer: str, username: str, persona: str,
         cited = parse_cited_numbers(text)
         ungrounded = _UNGROUNDED.get()
         pool = await get_pool()
-        async with pool.acquire(timeout=5) as conn:
+        # 2026-09-30 校准修复（B1）：5s 硬编码 → DB_ACQUIRE_TIMEOUT（原先该
+        # env 对 finalize 热路径不生效；压测实测 max 等待 389ms，差异无实际影响）
+        from ..core.config import DB_ACQUIRE_TIMEOUT
+        async with pool.acquire(timeout=DB_ACQUIRE_TIMEOUT) as conn:
             await conn.execute(
                 "INSERT INTO answer_traces (persona, username, query, answer, "
                 "answer_len, cited_numbers, retrieval_returned_count, "

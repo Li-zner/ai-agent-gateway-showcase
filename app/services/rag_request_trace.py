@@ -218,7 +218,10 @@ async def _persist(snapshot: dict) -> None:
         from ..core.db import get_pool
 
         pool = await get_pool()
-        async with pool.acquire(timeout=5) as conn:
+        # 2026-09-30 校准修复（B1）：5s 硬编码 → DB_ACQUIRE_TIMEOUT（原先该
+        # env 对 finalize 热路径不生效）
+        from ..core.config import DB_ACQUIRE_TIMEOUT
+        async with pool.acquire(timeout=DB_ACQUIRE_TIMEOUT) as conn:
             async with conn.transaction():
                 await _insert_request(conn, snapshot)
                 for span in snapshot.get("spans") or []:

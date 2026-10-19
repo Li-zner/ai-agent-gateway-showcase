@@ -1,9 +1,14 @@
 /** 手机号登录/注册/绑定 API（验证码防爆破由后端承担） */
-import { post } from './http'
+import { get, post } from './http'
 import { type TokenPair } from './http'
 
-export function sendPhoneCode(phone: string): Promise<{ message: string }> {
-  return post('/api/phone/send-code', { phone })
+/** Turnstile 人机校验配置（site_key 空 = 未启用，前端不渲染挂件） */
+export function getTurnstileConfig(): Promise<{ site_key: string; enabled: boolean }> {
+  return get('/api/phone/turnstile-config')
+}
+
+export function sendPhoneCode(phone: string, turnstileToken = ''): Promise<{ message: string }> {
+  return post('/api/phone/send-code', { phone, turnstile_token: turnstileToken })
 }
 
 export interface PhoneLoginResult extends TokenPair {

@@ -21,4 +21,13 @@ describe('cleanReasoning 跨块清洗', () => {
   it('正常思考行不受清洗影响', () => {
     expect(cleanReasoning('先给结论再展开细节\n')).toContain('先给结论再展开细节')
   })
+
+  it('剥除模型控制标记（ASCII 与全角竖线），保留其间可见正文', () => {
+    const cleaned = cleanReasoning('<|DSML|>invoke<|/DSML|>参数\n<｜DSML｜>call<｜/DSML｜>收尾')
+    expect(cleaned).not.toContain('<|')
+    expect(cleaned).not.toContain('<｜')
+    expect(cleaned).not.toContain('DSML')
+    expect(cleaned).toContain('invoke')
+    expect(cleaned).toContain('收尾')
+  })
 })

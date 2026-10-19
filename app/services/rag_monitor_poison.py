@@ -24,6 +24,10 @@ _POISON_AFTER_DEFAULT = 3
 #           要跨进程精确计数需给 rag_monitor_processing 加 retry_count 列（走迁移）。
 _fail_counts: dict[tuple, int] = {}
 
+# 已写 poison 标记、等待外层事务提交后才清账的键（台账 483：标记随事务提交才为真，
+# 提交前清计数会在回滚后让毒行从 1 重爬 N 轮）
+_pending_clear: set[tuple[str, int]] = set()
+
 
 def poison_after() -> int:
     """读取失败上限（每次读 env：毒行是低频路径，省一份 import 期常量陷阱）。"""
@@ -63,11 +67,27 @@ async def note_failure(conn, source: str, source_id: int,
         logger.warning(f"RAG 监测 poison 标记写入失败（下轮重试）: "
                        f"{type(mark_exc).__name__}: {mark_exc}")
         return
-    # 标记已确定性落库，才清计数（原实现 pop 在标记之前，标记失败即归零重爬）
-    _fail_counts.pop(key, None)
+    # 标记已写入本会话，但只有外层事务提交才算确定性落库：这里登记，
+    # 清计数推迟到 commit_cleared()（台账 483）
+    _pending_clear.add(key)
     logger.error(f"RAG 监测：行 {source}#{source_id} 连续 {attempts} 次落库失败，"
                  f"已标记 status='poison' 退出队列；规则集升版后会自动重试，"
                  f"请按上一条 warning 的异常定位该行。")
+
+
+def begin_cycle() -> None:
+    """新一轮开始：丢弃上一轮未提交就回滚的待清登记（否则会清掉不该清的计数）。"""
+    _pending_clear.clear()
+
+
+def commit_cleared() -> None:
+    """外层事务提交后由调用方结清：这些行的 poison 标记已落库，计数可以归零。
+
+    回滚路径不调用——计数本就停在 limit-1，下轮一次失败即到顶，不会重爬。
+    """
+    for key in _pending_clear:
+        _fail_counts.pop(key, None)
+    _pending_clear.clear()
 
 
 async def _mark_poison(conn, source: str, source_id: int) -> None:

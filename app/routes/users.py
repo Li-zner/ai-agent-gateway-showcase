@@ -36,18 +36,19 @@ async def get_user_profile(current_user: dict = Depends(get_current_user)):
     async with pool.acquire(timeout=5) as conn:
         row = await conn.fetchrow(
             "SELECT username, phone, role, display_name, email, avatar_url, extra, "
-            "quota_limited, used_requests, created_at "
+            "quota_limited, used_requests, created_at, permissions "
             "FROM users WHERE username=$1", username
         )
-        if not row:
-            raise HTTPException(404, "用户不存在")
-        # GitHub 试用额度（前端展示剩余提问次数）
-        from ..core.quota import remaining_questions
-        q_limited = bool(row["quota_limited"]) if row["quota_limited"] is not None else False
-        return {
-            "username": row["username"],
-            "phone": row["phone"] or "",
-            "role": row["role"] or "user",
+    if not row:
+        raise HTTPException(404, "用户不存在")
+    # GitHub 试用额度（前端展示剩余提问次数）
+    from ..core.quota import remaining_questions
+    q_limited = bool(row["quota_limited"]) if row["quota_limited"] is not None else False
+    return {
+        "username": row["username"],
+        "phone": row["phone"] or "",
+        "role": row["role"] or "user",
+        "permissions": list(row["permissions"] or []),
             "display_name": row["display_name"] or "",
             "email": row["email"] or "",
             "avatar_url": row["avatar_url"] or "",

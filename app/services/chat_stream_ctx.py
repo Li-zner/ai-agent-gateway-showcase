@@ -5,17 +5,16 @@ ChatStreamCtx 承载一次 /v2/chat/stream 请求的全程可变状态；各编�
 （fast_paths / react / core）通过它共享上下文与改写字段。
 """
 import asyncio
-import time
+import time  # noqa: F401 — 存量：L3 改用 day_window 后本模块已无直接使用，保留防隐式再导出
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from fastapi import HTTPException
 
 from ..models.schemas import ChatRequest
 from ..core.config import (
-    DEEPSEEK_MODEL, DEEPSEEK_FLASH_MODEL, SUMMARY_THRESHOLD,
+    LLM_PRIMARY_MODEL, LLM_FALLBACK_MODEL, SUMMARY_THRESHOLD,
 )
 from ..core.logging import setup_logging
 from ..core.metrics import gateway_requests_total
@@ -25,7 +24,7 @@ from ..core.constants import today_cn
 from ..core.quota import reserve_used_questions
 from ..core.semantic_cache import SemanticCache, safe_set
 from ..core.stream_utils import build_file_context
-from ..core.redis import get_redis
+from ..core.redis import get_redis  # noqa: F401 — 存量保留（同 time）
 from ..core.concurrency import spawn
 from ..middleware.rate_limit import (
     check_qps, check_concurrent, get_daily_usage, release_concurrent,
@@ -33,7 +32,7 @@ from ..middleware.rate_limit import (
 )
 from ..agents.memory import compress_message_history
 from ..agents.orchestrator import build_shared_context
-from .chat_support import lang_instruction, safe_format_prompt
+from .chat_support import lang_instruction, safe_format_prompt, set_request_lang
 from .rag_request_trace import finish_request, record_span, set_request_identity
 
 logger = setup_logging()
@@ -62,8 +61,8 @@ class ChatStreamCtx:
     # ---- 以下由 build_stream_ctx 填充 ----
     persona: object = None
     persona_id: str = ""
-    selected_model: str = DEEPSEEK_MODEL
-    model_try_list: List[str] = field(default_factory=lambda: [DEEPSEEK_MODEL])
+    selected_model: str = LLM_PRIMARY_MODEL
+    model_try_list: List[str] = field(default_factory=lambda: [LLM_PRIMARY_MODEL])
     messages: List[Dict] = field(default_factory=list)
     user_query: str = ""
     tools: List = field(default_factory=list)
@@ -82,6 +81,8 @@ class ChatStreamCtx:
     saved_normally: bool = False
     finished: bool = False
     has_history: bool = False
+    # 本轮注入的文件上下文长度（L2：同会话文件内容只计费一次的扣除依据）
+    file_ctx_chars: int = 0
     concurrent_lease: str = ""
     # 旅行槽位填充：pending 保存待补信息，clear 标记本轮消费后收尾清除。
     travel_pending: Dict = field(default_factory=dict)
@@ -97,9 +98,10 @@ async def ensure_chat_allowed(current_user: dict) -> str:
     """
     username = current_user["username"]
     user_role = current_user.get("role", "user")
-    # UTC 日期（2026-09-07 审查 P2）：daily_* 键的 TTL 对齐 UTC 日切（rate_limit P3 #39），
-    # 本地 now() 在容器时区非 UTC 时切日错位
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # 业务日（2026-09-28 L3 统一）：上海 05:00 切日，daily_* 键与 TTL 同一口径
+    # （day_window 单一真相源；此前 UTC 切日对中文用户在北京 08:00 重置，语义失真）
+    from ..core.day_window import quota_day
+    today = quota_day()
 
     if not await check_qps(username, user_role):
         gateway_requests_total.labels(method='POST', endpoint='/v2/chat/stream', status='429').inc()
@@ -144,21 +146,26 @@ def _build_system_prompt(req: ChatRequest, today_str: str):
     persona_id = persona.id if persona else (req.persona_id or pm.current_id)
     if persona:
         system_content = safe_format_prompt(persona.system_prompt, today=today_str, name=persona.name)
-        selected_model = persona.model or DEEPSEEK_MODEL
+        selected_model = persona.model or LLM_PRIMARY_MODEL
     else:
         system_content = f"你是AI助手。今天是{today_str}。"
-        selected_model = DEEPSEEK_MODEL
+        selected_model = LLM_PRIMARY_MODEL
     model_try_list = [selected_model]
-    if DEEPSEEK_FLASH_MODEL != selected_model:
-        model_try_list.append(DEEPSEEK_FLASH_MODEL)
+    if LLM_FALLBACK_MODEL != selected_model:
+        model_try_list.append(LLM_FALLBACK_MODEL)
     return persona, persona_id, selected_model, model_try_list, system_content
 
 
 async def _assemble_messages(req: ChatRequest, mm: MemoryManager, system_content: str,
-                             username: str = "") -> list:
-    """组装 system/user 消息：人格 + 共享上下文 + 文件上下文 + 历史压缩 + 最新消息提示"""
+                             username: str = "") -> tuple[list, int]:
+    """组装 system/user 消息：人格 + 共享上下文 + 文件上下文 + 历史压缩 + 最新消息提示
+
+    返回 (messages, file_ctx_chars)：注入的文件上下文长度单独带出，供计费层做
+    "同会话文件只计一次"的扣除估算（L2，2026-09-28 主人拍板）。
+    """
     messages = [{"role": "system", "content": system_content}]
     file_context_str = await build_file_context(req, username)
+    file_ctx_chars = len(file_context_str) if file_context_str else 0
     if file_context_str:
         messages.append({"role": "system", "content": file_context_str})
     history_dicts = await mm.get_context(limit=SUMMARY_THRESHOLD)
@@ -169,7 +176,7 @@ async def _assemble_messages(req: ChatRequest, mm: MemoryManager, system_content
         "role": "system",
         "content": "注意：请以用户最新的消息为准。如果用户改变了目的地、预算、人数等计划，立即按新信息回答，不要沿用旧信息。"
     })
-    return messages
+    return messages, file_ctx_chars
 
 
 def _rewrite_user_query(user_query: str, persona_id: str) -> str:
@@ -192,19 +199,23 @@ async def build_stream_ctx(req: ChatRequest, current_user: dict, today: str) -> 
     # 无会话 id 时用 uuid 后缀（2026-09-07 审查 P2）：秒级时间戳同秒并发会共用
     # 会话导致历史互相污染
     conv_id = req.conversation_id or f"conv_{username}_{uuid.uuid4().hex[:12]}"
-    mm = MemoryManager(username, conv_id)
+    # 人格/模型链先解析：缓存上下文要带真实人格与所选模型维度（2026-09-19 审查 core P2-5）；
+    # 也早于 MemoryManager 构造——画像写入口按人格排除评测流量（批1 B-P1-3）
+    persona, persona_id, selected_model, model_try_list, system_content = _build_system_prompt(req, today_str)
+    mm = MemoryManager(username, conv_id, persona_id)
     try:
         user_profile = await mm.get_profile()
     except Exception as _pf_err:
         logger.warning(f"画像加载失败（按无画像处理）: {_pf_err}")
         user_profile = ""
-    # 人格/模型链先解析：缓存上下文需要带真实人格与所选模型维度（2026-09-19 审查 core P2-5）
-    persona, persona_id, selected_model, model_try_list, system_content = _build_system_prompt(req, today_str)
     # 独立首轮问答允许跨会话复用；有历史时上层会跳过缓存，避免上下文串答。
+    # user_perms 进键（2026-09-28 L5）：升级 vip 后不再命中旧公开权限回答
+    # 先登记界面语言：兜底/安全这类答案级文案的无 lang 吐点据此切换中/英。
+    set_request_lang(req)
     _cache_ctx = SemanticCache.build_cache_ctx(
         username, persona_id, user_profile, "",
         user_query=req.query, lang=getattr(req, "lang", "") or "",
-        model=selected_model,
+        model=selected_model, user_perms=user_perms,
     )
 
     ctx = ChatStreamCtx(
@@ -227,7 +238,8 @@ async def build_stream_ctx(req: ChatRequest, current_user: dict, today: str) -> 
     system_content += f"\n{shared_context}"
     system_content += lang_instr
 
-    ctx.messages = await _assemble_messages(req, mm, system_content, username)
+    ctx.messages, ctx.file_ctx_chars = await _assemble_messages(
+        req, mm, system_content, username)
     ctx.has_history = any(
         msg.get("role") in ("user", "assistant") for msg in ctx.messages
     )
@@ -252,7 +264,7 @@ async def finalize_answer(ctx: ChatStreamCtx, answer: str, write_cache: bool = T
         try:
             from .answer_trace import record_answer
             record_answer(ctx.user_query or ctx.req.query, answer, ctx.username,
-                          persona=ctx.persona_id or "civil_code")
+                          persona=ctx.persona_id or "default")  # R2 三处之一：空 persona 不得落 civil_code（评测集污染）
         except Exception as e:  # 监测采集绝不影响回答主流程，但留痕可查
             import logging
             logging.getLogger(__name__).debug(

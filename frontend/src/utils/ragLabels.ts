@@ -22,6 +22,7 @@ const STATUS_LABELS: Record<string, string> = {
   verifying: '验证中',
   rolling_back: '回滚中',
   rolled_back: '已回滚',
+  checked: '已核对',
   cancelled: '已取消',
 }
 

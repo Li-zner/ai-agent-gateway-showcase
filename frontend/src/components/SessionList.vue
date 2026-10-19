@@ -4,8 +4,6 @@ import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useChatStore } from '../stores/chat'
 import { downloadSession } from '../utils/sessions'
-import { userPreview } from '../utils/conversationProfile'
-import type { ChatSession } from '../utils/sessions'
 
 const { t, locale } = useI18n()
 const chat = useChatStore()
@@ -53,11 +51,6 @@ function exportSession(id: string) {
   if (s) downloadSession(s, locale.value)
 }
 
-function lastUserPreview(session: ChatSession): string {
-  const message = [...session.messages].reverse().find((item) => item.role === 'user')
-  return message ? userPreview(message.content) : ''
-}
-
 </script>
 
 <template>
@@ -84,7 +77,6 @@ function lastUserPreview(session: ChatSession): string {
       <template v-else>
         <div class="item-copy">
           <span class="item-name" :title="s.title">{{ s.title }}</span>
-          <span v-if="lastUserPreview(s)" class="item-preview">{{ lastUserPreview(s) }}</span>
         </div>
         <button
           class="pin-btn"
@@ -132,14 +124,6 @@ function lastUserPreview(session: ChatSession): string {
   min-width: 0;
   display: grid;
   gap: 2px;
-}
-.item-preview {
-  overflow: hidden;
-  color: var(--text-muted);
-  font-size: 11px;
-  line-height: 1.3;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 /* 置顶会话使用浅主色底强调 */
 .history-item.pinned {

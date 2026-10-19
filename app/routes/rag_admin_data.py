@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..core.audit import ACT_RAG_DATA_ASK, audit
 from ..core.db_readonly import ReadonlyPoolNotConfigured
@@ -16,12 +16,24 @@ from ..services.data_ask_sql import ALLOWED_TABLES, SqlRejectedError
 
 data_router = APIRouter(tags=["admin"])
 
+# 批1 P1-9（2026-09-28）：history 会被原样拼进 messages，放在 system 提示之后、
+# 本轮问题之前。放行 system/tool 等于让调用方追加一条系统消息改 SQL 阶段规则。
+_HISTORY_ROLES = {"user", "assistant"}
+
 
 class DataAskBody(BaseModel):
     """问数入参：问题必填，history 供多轮追问复用上一轮的表与口径。"""
 
     question: str = Field(max_length=QUESTION_MAX_CHARS)
     history: list[dict[str, str]] = Field(default_factory=list, max_length=12)
+
+    @field_validator("history")
+    @classmethod
+    def _history_roles(cls, v: list[dict[str, str]]) -> list[dict[str, str]]:
+        for item in v:
+            if item.get("role") not in _HISTORY_ROLES:
+                raise ValueError("history 只接受 role=user/assistant")
+        return v
 
 
 @data_router.get("/data/tables")

@@ -25,12 +25,17 @@ async function submit() {
   loading.value = true
   try {
     await auth.login(username.value, password.value)
-    if (auth.user?.role !== 'admin') {
+    if (auth.user?.role !== 'admin' && !(auth.user?.permissions ?? []).includes('dbagent.view')) {
       await auth.logout()
-      error.value = '仅管理员可进入 RAG 控制台'
+      error.value = '该账号没有中控台访问能力，请联系管理员开通'
       return
     }
-    await router.replace(target())
+    if (target() === '/') {
+      // 分流：admin 进数据台；子账号（仅 dbagent 能力）直达 Agent 对话台
+      await router.replace(auth.user?.role === 'admin' ? '/admin/rag' : '/admin/rag/chat')
+    } else {
+      await router.replace(target())
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : '登录失败'
   } finally {

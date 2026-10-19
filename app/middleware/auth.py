@@ -23,6 +23,9 @@ from ..core.auth_cookies import ACCESS_COOKIE
 logger = setup_logging()
 security = HTTPBearer(auto_error=False)
 
+# 假哈希缓存（见 _dummy_hash）：空串 = 尚未生成
+_DUMMY_HASH: str = ""
+
 # ---------- 数据库用户操作 ----------
 import asyncpg
 from ..core.config import POSTGRES_DSN
@@ -52,7 +55,13 @@ async def get_user(username: str):
 
 async def authenticate_user(username: str, password: str):
     user = await get_user(username)
-    if not user or not verify_password(password, user["hashed_password"]):
+    if not user:
+        # 丁（2026-10-18）：账号不存在也要付出与"密码错误"等价的哈希开销，
+        # 否则"不存在"分支少一次 bcrypt（数十毫秒）——错误文案虽然是通用的，
+        # 响应时延不是，访客可据此把库里的用户名一个个筛出来。
+        verify_password(password, _dummy_hash())
+        return None
+    if not verify_password(password, user["hashed_password"]):
         return None
     # 禁用账号拒绝登录（A8：管理员封禁后禁止登录）
     if not user.get("is_active", True):
@@ -61,6 +70,18 @@ async def authenticate_user(username: str, password: str):
     if is_legacy_hash(user["hashed_password"]):
         await _upgrade_legacy_hash(username, password)
     return user
+
+
+def _dummy_hash() -> str:
+    """时间对齐用的假哈希：随机口令经同一方案生成，永不可能被猜中
+
+    惰性生成（首次用到才算）：bcrypt 一次约数十毫秒，放 import 期会让启动变慢，
+    而这条路径只在"账号不存在"时走；生成后缓存复用，后续 miss 成本恒定。
+    """
+    global _DUMMY_HASH
+    if not _DUMMY_HASH:
+        _DUMMY_HASH = hash_password(secrets.token_hex(32))
+    return _DUMMY_HASH
 
 
 async def _upgrade_legacy_hash(username: str, password: str):

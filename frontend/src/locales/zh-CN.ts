@@ -139,6 +139,7 @@ export default {
   "fill_phone_code": "请填写手机号和验证码",
   "agree_required": "请阅读并同意用户协议",
   "code_sent": "验证码已发送，请查收短信",
+  "turnstile_pending": "请先完成上方人机验证",
   "send_failed_2": "发送失败",
   "analyze_file": "请分析这个文件",
   "travel_mode": "旅行",

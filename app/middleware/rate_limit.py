@@ -9,7 +9,6 @@
   放行不是静默行为：每次 fail-open 打 rate_limit_failopen_total{gate}，
   配套 alert.rules.yml 规则 26 RateLimitFailOpen（2026-09-19 审查 core P2-6）。
 """
-import time
 import uuid
 
 from ..core.metrics import rate_limit_failopen_total
@@ -235,7 +234,7 @@ return 0
 
 
 async def get_daily_usage(username: str, date_str: str):
-    """读取日用量（date_str 统一用 UTC 日期，见 P3 #39 时区约定）"""
+    """读取日用量（date_str 统一用业务日：上海 05:00 切日，见 core.day_window）"""
     try:
         r = await get_redis()
         req_key = f"daily_req:{username}:{date_str}"
@@ -259,12 +258,12 @@ async def update_daily_usage(username: str, date_str: str, inc_request=1, inc_to
         r = await get_redis()
         req_key = f"daily_req:{username}:{date_str}"
         token_key = f"daily_token:{username}:{date_str}"
-        # TTL 对齐到次日 UTC 零点；+60s 余量防跨天边界 Key 提前过期（P2）——
-        # 若请求恰在 23:59:59 落在旧日期 Key 上，ttl 仅约 1s，可能在毫秒级读到计数前
-        # 被 Redis 清掉，导致当日计数丢失。留 60s 缓冲让边界请求计数在重置前被读走。
-        now = time.time()
-        tomorrow = int(now) - (int(now) % 86400) + 86400
-        ttl = max(1, (tomorrow - int(now)) + 60)
+        # TTL 对齐到下一次业务日切（上海 05:00，day_window 单一真相源，L3 统一）；
+        # +60s 余量防跨天边界 Key 提前过期（P2）——若请求恰在切日前一秒落在旧日期
+        # Key 上，ttl 仅约 1s，可能在毫秒级读到计数前被 Redis 清掉，导致当日计数
+        # 丢失。留 60s 缓冲让边界请求计数在重置前被读走。
+        from ..core.day_window import seconds_until_flip
+        ttl = max(1, seconds_until_flip() + 60)
         await r.eval(
             _DAILY_UPDATE_LUA, 2, req_key, token_key,
             inc_request, inc_token, ttl,
@@ -280,9 +279,10 @@ async def reserve_daily_request(username: str, date_str: str, role: str = "user"
         r = await get_redis()
         req_key = f"daily_req:{username}:{date_str}"
         token_key = f"daily_token:{username}:{date_str}"
-        now = time.time()
-        tomorrow = int(now) - (int(now) % 86400) + 86400
-        ttl = max(1, (tomorrow - int(now)) + 60)
+        # L3 统一：与 update_daily_usage 同一业务日切 TTL（上海 05:00），
+        # 两处 TTL 不一致会让预占键比计数键活得久/死得早
+        from ..core.day_window import seconds_until_flip
+        ttl = max(1, seconds_until_flip() + 60)
         return int(await r.eval(
             _DAILY_RESERVE_LUA, 2, req_key, token_key,
             limits["daily_req"], limits["daily_token"], ttl,

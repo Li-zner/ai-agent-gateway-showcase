@@ -22,7 +22,14 @@ async def _gather_geocodes(
     departure: str,
     destination: str,
 ) -> tuple[dict, dict]:
-    """顺序调用同一 AsyncClient，避免连接池内并发取消导致资源告警。"""
+    """顺序调用同一 AsyncClient，避免连接池内并发取消导致资源告警。
+
+    返回前过 geocode 包含性守卫（2026-09-29）：高德对垃圾输入也会模糊匹配，
+    weather 侧 2026-09-10 就因此答非所问过（"我需要具体"→枣庄薛城区）——
+    路线规划此前漏同款，"从我家到你家"会被规划成两个随机城市。
+    """
+    from ..core.place_extract import geocode_contains
+
     dep = await _amap_json(
         client,
         "https://restapi.amap.com/v3/geocode/geo",
@@ -33,21 +40,25 @@ async def _gather_geocodes(
         "https://restapi.amap.com/v3/geocode/geo",
         {"key": amap_key, "address": destination, "city": destination},
     )
+    if dep.get("status") != "1" or dest.get("status") != "1":
+        raise ValueError("地理编码失败")
+    for label, candidate, geo in (("出发地", departure, dep),
+                                  ("目的地", destination, dest)):
+        geocodes = geo.get("geocodes") or []
+        if not geocodes or not geocode_contains(candidate, geocodes[0]):
+            raise ValueError(f"无法识别{label}: {candidate[:20]}")
     return dep, dest
 
 
 async def fetch_amap_route_data(amap_key: str, departure: str, destination: str) -> dict:
     """抓取地理编码、驾车、公交、骑行和步行数据。"""
     async with httpx.AsyncClient(timeout=MAP_API_TIMEOUT) as client:
+        # status/守卫校验已收进 _gather_geocodes（2026-09-29），此处不重复
         geo_dep, geo_dest = await _gather_geocodes(
             client, amap_key, departure, destination
         )
-        if geo_dep.get("status") != "1" or geo_dest.get("status") != "1":
-            raise ValueError("地理编码失败")
-        dep_loc = geo_dep["geocodes"][0]["location"] if geo_dep.get("geocodes") else None
-        dest_loc = geo_dest["geocodes"][0]["location"] if geo_dest.get("geocodes") else None
-        if not dep_loc or not dest_loc:
-            raise ValueError("无法获取起终点坐标")
+        dep_loc = geo_dep["geocodes"][0]["location"]
+        dest_loc = geo_dest["geocodes"][0]["location"]
         return {
             "dep_loc": dep_loc,
             "dest_loc": dest_loc,
@@ -92,6 +103,15 @@ def _kilometers(meters) -> float:
     return round(int(meters or 0) / 1000, 1)
 
 
+def _railway_mode(name: str) -> str:
+    """按车次字头归类：G→高铁、D→动车、其余（K/T/Z/纯数字/空）→火车。"""
+    if name[:1].upper() == "G":
+        return "高铁"
+    if name[:1].upper() == "D":
+        return "动车"
+    return "火车"
+
+
 def _parse_transit_result(transit: dict) -> list:
     """把高德公交/火车结果转换为统一 legs 结构。"""
     raw_transits = _as_dict(transit.get("route")).get("transits") or []
@@ -106,7 +126,10 @@ def _parse_transit_result(transit: dict) -> list:
             if "railway" in segment:
                 railway = _as_dict(segment["railway"])
                 legs.append({
-                    "mode": "火车" if "火车" in str(railway.get("name", "")) else "高铁",
+                    # 车次字头判断（2026-09-29）：原逻辑"名字含'火车'否则高铁"会把
+                    # K/T/Z 字头普速全部误标"高铁"；按高德车次命名规范 G=高铁、
+                    # D=动车、其余（K/T/Z/纯数字）=火车
+                    "mode": _railway_mode(str(railway.get("name", ""))),
                     "from": railway.get("departure_station", {}).get("name", ""),
                     "to": railway.get("arrival_station", {}).get("name", ""),
                     "duration_min": _minutes(railway.get("time")),

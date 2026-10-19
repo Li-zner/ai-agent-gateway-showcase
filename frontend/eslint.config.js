@@ -13,8 +13,8 @@ export default tseslint.config(
     languageOptions: { parserOptions: { parser: tseslint.parser } },
   },
   {
-    // MessageBubble：markdown 输出已经 DOMPurify.sanitize，v-html 为有意使用
-    files: ['src/components/MessageBubble.vue'],
+    // 有意的 v-html：MessageBubble 走 DOMPurify.sanitize 的 markdown；WalletModal 是本仓静态 locale 字面量（自带 <strong>/<span.highlight>，非用户输入）
+    files: ['src/components/MessageBubble.vue', 'src/components/WalletModal.vue'],
     rules: { 'vue/no-v-html': 'off' },
   },
   {

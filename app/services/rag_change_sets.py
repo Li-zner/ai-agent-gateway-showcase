@@ -401,12 +401,23 @@ def _restore_plan(snapshot: dict) -> tuple[list[int], dict[str, bool]]:
 
 
 async def rollback_change_set(conn, change_set_id: int) -> dict:
-    """按快照回滚已应用的变更集：删回新增行 / 恢复 valid 原值。"""
+    """按快照回滚已应用的变更集：删回新增行 / 恢复 valid 原值。
+
+    幂等（台账 482 跨 conn 收口，2026-10-08 主人选「幂等自愈 + 发起留痕」档）：已是
+    `rolled_back` 不再抛错，直接回"已回滚"摘要。回滚器在自己的连接与事务里干活，
+    与动作行那条事务不同源，存在"变更集已回滚、动作行没写上"的崩溃窗口——那时
+    抛错会让运营第二次点回滚永远卡在 failed，放行才让重复点击变成对账自愈。
+    removed/restored 是当时的执行计数，事后无从重算，故回 0 并带
+    `already_rolled_back` 标记，不假装这次又删了一遍。
+    """
     row = await conn.fetchrow(
         "SELECT * FROM rag_change_sets WHERE change_set_id=$1 FOR UPDATE",
         change_set_id)
     if row is None:
         raise ChangeSetError(f"变更集不存在: {change_set_id}")
+    if row["status"] == "rolled_back":
+        return {"status": "rolled_back", "already_rolled_back": True,
+                "removed_count": 0, "restored_count": 0}
     if row["status"] != "applied":
         raise ChangeSetError(
             f"变更集 {change_set_id} 状态为 {row['status']}，无需或不能回滚")
