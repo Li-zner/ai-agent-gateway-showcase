@@ -25,6 +25,9 @@ ACT_DBAGENT_TASK = "dbagent_task"
 ACT_DBAGENT_WRITE_APPROVAL = "dbagent_write_approval"
 ACT_DBAGENT_PLAN_APPROVAL = "dbagent_plan_approval"
 ACT_DBAGENT_CHANGE_ROLLBACK = "dbagent_change_rollback"
+ACT_DBAGENT_MONITOR_CREATE = "dbagent_monitor_create"
+ACT_DBAGENT_MONITOR_UPDATE = "dbagent_monitor_update"
+ACT_DBAGENT_MONITOR_RUN = "dbagent_monitor_run"
 
 
 async def audit(user_id: str, action: str, detail: dict | None = None) -> None:

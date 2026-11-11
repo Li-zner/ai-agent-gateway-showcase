@@ -73,6 +73,7 @@ flowchart LR
 | 认证与保护 | [auth.py](app/middleware/auth.py) / [rate_limit.py](app/middleware/rate_limit.py) | JWT 轮换、Redis 分布式限流、熔断降级 |
 | 数据库 Agent 守卫 | [sql_guard.py](app/services/dbagent/sql_guard.py) / [sql_ast.py](app/services/dbagent/sql_ast.py) / [catalog.py](app/services/dbagent/catalog.py) | SQL AST 校验、表白名单、越权写拒绝、行列脱敏出口 |
 | 数据库 Agent 执行环 | [agent.py](app/services/dbagent/agent.py) / [agent_tools.py](app/services/dbagent/agent_tools.py) / [evidence.py](app/services/dbagent/evidence.py) | 计划提交、工具调用、步数预算、答案引用逐条对账 |
+| 数据库 Agent 数据监控 | [monitors.py](app/services/dbagent/monitors.py) / [monitor_tools.py](app/services/dbagent/monitor_tools.py) / [rag_admin_dbagent_monitors.py](app/routes/rag_admin_dbagent_monitors.py) | 单指标只读 SQL + 阈值定时巡检、原子领取防重采、陈旧标记、Agent 三工具（清单/立即执行/建草稿） |
 | 前端流式交互 | [sse.ts](frontend/src/api/sse.ts) / [chat.ts](frontend/src/stores/chat.ts) | 跨 chunk 攒帧、序号守卫、会话状态管理 |
 
 ## 技术栈
@@ -90,7 +91,7 @@ showcase/            面向招聘方的项目展示
 
 ## 同步说明
 
-本仓是脱敏展示快照，核心代码同步自私有主仓。支付模块、修复台账、部署配置、评测原始数据和内部复盘不进入公开仓库；数据库 Agent 只公开守卫与执行环，写侧编排、审批门与改动账本实现保留在私有主仓。对外数字只保留可解释、可追溯且明确标注为自测的口径。
+本仓是脱敏展示快照，核心代码同步自私有主仓。支付模块、修复台账、部署配置、评测原始数据和内部复盘不进入公开仓库；数据库 Agent 只公开守卫、执行环与只读数据监控，写侧编排、审批门与改动账本实现保留在私有主仓。对外数字只保留可解释、可追溯且明确标注为自测的口径。
 
 已知边界：
 

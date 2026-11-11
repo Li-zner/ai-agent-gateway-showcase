@@ -105,6 +105,34 @@ _TOOLS = [
             "time_to": {"type": "string", "description": "可选，ISO 时间戳上界"}},
             "required": ["query"]}}},
     {"type": "function", "function": {
+        "name": "list_monitors",
+        "description": "列出数据监控项：当前值、阈值状态、最后采集时间与启停状态。"
+                       "监控值来自后台按间隔采集，不是实时查询。",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "run_monitor_once",
+        "description": "立即执行一条已存在的监控项，返回最新值与阈值状态"
+                       "（受只读守卫与语句超时约束）。参数给监控名或数字 id。",
+        "parameters": {"type": "object", "properties": {
+            "monitor": {"type": "string", "description": "监控名或数字 id"}},
+            "required": ["monitor"]}}},
+    {"type": "function", "function": {
+        "name": "create_monitor",
+        "description": "创建一条数据监控的停用草稿：单条只读 SELECT，结果必须是单列"
+                       "单行的数值，配合比较符与阈值。不能直接启用；需要由人在数据"
+                       "监控页面手动启用后才会定时采集。",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "展示名，需唯一"},
+            "sql": {"type": "string",
+                    "description": "单条只读 SELECT，返回单列单行数值"},
+            "op": {"type": "string", "enum": ["gt", "gte", "lt", "lte"],
+                   "description": "越界方向（大于/大于等于/小于/小于等于阈值）"},
+            "threshold": {"type": "number", "description": "阈值"},
+            "interval_sec": {"type": "integer",
+                             "description": "采集间隔秒，默认 60，最小 30"},
+            "unit": {"type": "string", "description": "展示单位，可选"}},
+            "required": ["name", "sql", "op", "threshold"]}}},
+    {"type": "function", "function": {
         "name": "submit_report",
         "description": "提交最终 Markdown 报告并结束任务。规则：每个数字紧跟 [E#] 方括号引用；"
                        "只允许查询结果出现过的原值，平均数/百分比/差值等派生数字一律改文字。"

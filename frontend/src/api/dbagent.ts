@@ -1,5 +1,5 @@
 /** DB Agent 任务与审批 API（中控台 Agent 分区）。 */
-import { get, post, put } from './http'
+import { get, post, put, request } from './http'
 
 export interface DbAgentPreview {
   kind: string
@@ -139,6 +139,73 @@ export function listDbAgentChanges(): Promise<{ items: DbChangeLogItem[] }> {
 
 export function rollbackDbAgentChange(changeId: number): Promise<{ ok: boolean }> {
   return post<{ ok: boolean }>(`/api/admin/rag/dbagent/changes/${changeId}/rollback`, {})
+}
+
+/** ---- 数据监控（单指标 SQL + 阈值）---- */
+
+export type DbAgentMonitorOp = 'gt' | 'gte' | 'lt' | 'lte'
+export type DbAgentMonitorStatus = 'ok' | 'breach' | 'unknown'
+
+/** 监控项：last_* 是最近一次采集快照，不代表实时值。 */
+export interface DbAgentMonitor {
+  id: number
+  name: string
+  sql: string
+  unit: string | null
+  interval_sec: number
+  enabled: boolean
+  op: DbAgentMonitorOp
+  threshold: number
+  last_value: number | null
+  last_status: DbAgentMonitorStatus
+  last_error: string | null
+  last_run_at: string | null
+  last_ok_at: string | null
+  next_run_at: string | null
+  created_by: string
+  created_at: string
+  updated_at: string
+}
+
+export interface DbAgentMonitorDraft {
+  name: string
+  sql: string
+  op: DbAgentMonitorOp
+  threshold: number
+  interval_sec: number
+  unit: string | null
+}
+
+/** 立即执行返回：row 快照 + 本次结果（status/value/error）。 */
+export interface DbAgentMonitorRunResult extends DbAgentMonitor {
+  status: DbAgentMonitorStatus
+  value: number | null
+  error: string | null
+}
+
+export function listDbAgentMonitors(): Promise<DbAgentMonitor[]> {
+  return get<DbAgentMonitor[]>('/api/admin/rag/dbagent/monitors')
+}
+
+/** 创建停用草稿；启用走 updateDbAgentMonitor。 */
+export function createDbAgentMonitor(body: DbAgentMonitorDraft): Promise<DbAgentMonitor> {
+  return post<DbAgentMonitor>('/api/admin/rag/dbagent/monitors', body)
+}
+
+export function updateDbAgentMonitor(
+  id: number,
+  body: Partial<DbAgentMonitorDraft & { enabled: boolean }>,
+): Promise<DbAgentMonitor> {
+  // http 层无 patch 封装，request 直调（与 deleteSubAccount 同法）
+  return request<DbAgentMonitor>(`/api/admin/rag/dbagent/monitors/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export function runDbAgentMonitorOnce(id: number): Promise<DbAgentMonitorRunResult> {
+  return post<DbAgentMonitorRunResult>(`/api/admin/rag/dbagent/monitors/${id}/run`)
 }
 
 /** ---- 子账号能力管理（仅 admin）---- */

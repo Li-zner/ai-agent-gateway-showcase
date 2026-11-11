@@ -4,9 +4,10 @@
 发给模型，模型回 tool_calls，代码执行后以 role=tool 消息回喂——协议正确性
 由 API 保证，不再 brace 截取自解析。
 
-十个工具：run_sql / write_sql / write_batch / get_metrics / list_recent_writes /
+十三个工具：run_sql / write_sql / write_batch / get_metrics / list_recent_writes /
 submit_plan（计划门，人工批准后再动手）/ request_more_steps（步数延长）/
-rollback_change（变更回滚）/ recall_memory（会话记忆检索）/
+rollback_change（变更回滚）/ recall_memory（会话记忆检索）/ list_monitors、
+run_monitor_once、create_monitor（数据监控，草稿需人工启用）/
 submit_report（终点，过证据链）。
 写三道门不变：guard_write_sql -> 人工审批 -> dbagent_writer 角色；批提案
 （write_batch，P1-2）整组一次审批、单事务原子执行、账本共享 group_id。
@@ -62,6 +63,12 @@ from .agent_tools import (  # noqa: F401 批次 F 步骤 1：re-export 保持 ag
     _tool_submit_plan,
     _tool_rollback_change,
     _tool_submit_report
+)
+
+from .monitor_tools import (
+    _tool_create_monitor,
+    _tool_list_monitors,
+    _tool_run_monitor_once,
 )
 
 MAX_STEPS = 20
@@ -275,6 +282,12 @@ async def _execute_tool(name: str, args: dict, ctx: _RunCtx) -> tuple[str, dict 
         return await _tool_rollback_change(args, ctx), None
     if name == "recall_memory":
         return await _tool_recall_memory(args, ctx), None
+    if name == "list_monitors":
+        return await _tool_list_monitors(args, ctx), None
+    if name == "run_monitor_once":
+        return await _tool_run_monitor_once(args, ctx), None
+    if name == "create_monitor":
+        return await _tool_create_monitor(args, ctx), None
     if name == "submit_report":
         return _tool_submit_report(args, ctx)
-    return f"未知工具 {name!r}。可用：run_sql / write_sql / write_batch / get_metrics / list_recent_writes / submit_plan / rollback_change / recall_memory / request_more_steps / submit_report。", None
+    return f"未知工具 {name!r}。可用：run_sql / write_sql / write_batch / get_metrics / list_recent_writes / submit_plan / rollback_change / recall_memory / list_monitors / run_monitor_once / create_monitor / request_more_steps / submit_report。", None

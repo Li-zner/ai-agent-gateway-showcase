@@ -25,6 +25,7 @@ import {
   type RagStatus,
 } from '../api/ragAdmin'
 import RagDbAgentWorkspace from '../components/RagDbAgentWorkspace.vue'
+import RagDbAgentMonitors from '../components/RagDbAgentMonitors.vue'
 import {
   listDbAgentChanges,
   listDbAgentTasks,
@@ -652,7 +653,7 @@ onUnmounted(() => {
 <template>
   <div class="ops-shell" :class="{ 'wide-mode': persona !== 'rag-ops' }">
     <!-- DB Agent 用自己的会话侧栏；诊断助手与问数共用运维侧栏 -->
-    <aside v-if="persona !== 'db-agent'" class="ops-sidebar">
+    <aside v-if="persona === 'rag-ops'" class="ops-sidebar">
       <button class="new-chat" @click="clearConversation">新建运维会话</button>
 
       <!-- 事件即分组节点（2026-10-03：行首 chevron 折叠/展开其下会话；带顺序编号，
@@ -892,6 +893,11 @@ onUnmounted(() => {
           @click="persona = 'rag-ops'"
         >诊断助手</button>
         <button :class="{ active: persona === 'db-agent' }" @click="persona = 'db-agent'">数据库Agent<span v-if="pendingApprovals" class="nav-badge">{{ pendingApprovals }}</span></button>
+        <button
+          v-if="hasCap(auth.user, 'dbagent.monitor')"
+          :class="{ active: persona === 'db-monitors' }"
+          @click="persona = 'db-monitors'"
+        >数据监控</button>
       </nav>
       <p v-if="persona === 'rag-ops' && selectedIncident" class="top-context">
         当前上下文：事件 #{{ selectedIncident.incident_id }} · {{ selectedIncident.title }}
@@ -904,7 +910,8 @@ onUnmounted(() => {
       <template v-else>
         <!-- DB Agent 人格：页内嵌入工作台（任务/时间线/审批卡/报告）；
              问数不再独立成窗（2026-10-03 并入诊断助手：疑似查数问题后端实查后作答） -->
-        <RagDbAgentWorkspace v-if="persona === 'db-agent'" />
+        <RagDbAgentMonitors v-if="persona === 'db-monitors'" />
+        <RagDbAgentWorkspace v-else-if="persona === 'db-agent'" />
         <template v-else>
         <div ref="transcriptEl" class="transcript">
           <article

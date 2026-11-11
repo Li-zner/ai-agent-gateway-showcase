@@ -21,6 +21,8 @@ CAPABILITIES: dict[str, tuple[str, str]] = {
     "dbagent.write_delete": ("删除数据", "允许 DB Agent 提议 DELETE 语句"
                              "（生成前拦截；admin 恒有，无需勾选）"),
     "dbagent.rollback": ("执行回滚", "回滚已应用的变更（HG 编号）"),
+    "dbagent.monitor": ("管理数据监控", "创建、修改、启停按阈值监控数据的定时查询"
+                        "（默认不授予子账号）"),
     "rag.ask": ("诊断问答", "使用诊断助手（含只读问数）"),
 }
 

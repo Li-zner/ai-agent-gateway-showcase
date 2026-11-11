@@ -264,6 +264,16 @@ dbagent_guard_rejects_total = Counter(
     'SQL 守卫拒绝次数',
     ['kind']  # read / write
 )
+dbagent_monitor_checks_total = Counter(
+    'dbagent_monitor_checks_total',
+    'DB Agent 数据监控采集结果',
+    ['outcome']  # ok / breach / unknown
+)
+dbagent_monitor_value = Gauge(
+    'dbagent_monitor_value',
+    'DB Agent 数据监控最近一次值（按监控项 id）',
+    ['monitor_id']
+)
 dbagent_nightly_eval_last_passed = Gauge(
     'dbagent_nightly_eval_last_passed',
     '最近一次黄金评测夜跑通过例数'
